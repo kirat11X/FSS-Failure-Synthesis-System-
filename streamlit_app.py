@@ -3,8 +3,9 @@
     streamlit run streamlit_app.py
 
 Pipeline: envelope fixtures -> MockRetriever -> decoder -> evidence -> findings.
-Findings are rule-based and cite event_ids. If ANTHROPIC_API_KEY is set, Claude can
-also write an explanation grounded only on the evidence JSON (optional).
+Findings are rule-based and cite event_ids. Optionally, a local Ollama model (any pulled
+chat model, e.g. qwen3:4b) or Claude (if ANTHROPIC_API_KEY is set) writes an explanation
+grounded only on the evidence JSON.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -27,6 +29,9 @@ GOLDEN = ROOT / "fixtures" / "golden"
 SCHEMA = ROOT / "schemas" / "drone_v0.yaml"
 MAX_WINDOW_NS = 3600 * 10**9  # retrieval contract: window <= 1 h
 MODEL = "claude-opus-5-5"
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
+NO_MODEL = "Off (rule-based findings only)"
+CLAUDE = f"Claude ({MODEL}, API)"
 
 # (event_name, field, value) -> (severity, plain-language problem). Anything not listed is normal.
 RULES: dict[tuple[str, str, str], tuple[str, str]] = {
@@ -135,6 +140,55 @@ def ask_claude(evidence: dict, query: str) -> str:
     return "".join(b.text for b in response.content if b.type == "text")
 
 
+def ollama_post(path: str, body: dict, timeout: float):
+    req = urllib.request.Request(OLLAMA_URL + path, data=json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json"})
+    return urllib.request.urlopen(req, timeout=timeout)
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def ollama_models() -> tuple[dict[str, list[str]], str | None]:
+    """Chat-capable local models as {name: capabilities}, or the reason there are none.
+    Embedding-only models (e.g. nomic-embed-text) cannot answer, so they are left out."""
+    try:
+        with urllib.request.urlopen(OLLAMA_URL + "/api/tags", timeout=3) as r:
+            names = sorted(m["name"] for m in json.load(r).get("models", []))
+        models = {}
+        for name in names:
+            with ollama_post("/api/show", {"model": name}, timeout=5) as r:
+                caps = json.load(r).get("capabilities", [])
+            if "completion" in caps:
+                models[name] = caps
+    except (OSError, ValueError) as exc:
+        return {}, f"Ollama not reachable at {OLLAMA_URL} ({exc}). Start it with: ollama serve"
+    return models, None if models else "No chat model pulled (try: ollama pull qwen3:4b)"
+
+
+def ask_ollama(model: str, caps: list[str], evidence: dict, query: str):
+    """Stream a local Ollama model's reply as ("thinking" | "answer", text) chunks."""
+    body = {
+        "model": model, "stream": True,
+        "messages": [{"role": "system", "content": SYSTEM_PROMPT},
+                     {"role": "user", "content":
+                      f"Evidence:\n```json\n{json.dumps(evidence)}\n```\n\nQuestion: {query}"}],
+        "options": {"temperature": 0.2, "num_ctx": 8192},
+    }
+    if "thinking" in caps:
+        # Some reasoning models (e.g. qwen3:4b) think even with think=false and then leak it
+        # into the answer; think=true keeps the reasoning in its own field instead.
+        body["think"] = True
+    with ollama_post("/api/chat", body, timeout=600) as r:
+        for line in r:
+            chunk = json.loads(line)
+            if "error" in chunk:
+                raise RuntimeError(chunk["error"])
+            msg = chunk.get("message", {})
+            if msg.get("thinking"):
+                yield "thinking", msg["thinking"]
+            if msg.get("content"):
+                yield "answer", msg["content"]
+
+
 @st.cache_resource
 def registry():
     return load_schema_file(SCHEMA)
@@ -176,13 +230,20 @@ with st.sidebar:
     st.header("Retrieval window")
     st.write(f"Data spans **{fmt_ns(t_min)}** → **{fmt_ns(t_max)}** UTC")
     span_s = max(1, -(-(t_max - t_min + 1) // 10**9))
-    offset = st.slider("Start (seconds after first event)", 0, max(0, span_s - 1), 0)
+    # A slider needs min < max, so data spanning under 2 s has no start to choose.
+    offset = st.slider("Start (seconds after first event)", 0, span_s - 1, 0) if span_s > 1 else 0
     length = st.slider("Length (seconds, max 3600)", 1, 3600, min(3600, max(1, span_s - offset)))
     source_choice = st.selectbox("Source", ["ALL"] + [str(s) for s in all_sources])
     max_events = st.number_input("max_events", 1, 10_000, 100)
-    use_claude = st.toggle("Explain with Claude", value=False,
-                           disabled=not os.environ.get("ANTHROPIC_API_KEY"),
-                           help="Needs ANTHROPIC_API_KEY set on the server.")
+
+    st.header("Model")
+    local, ollama_problem = ollama_models()
+    options = [NO_MODEL, *local] + ([CLAUDE] if os.environ.get("ANTHROPIC_API_KEY") else [])
+    model = st.selectbox("Explain findings with", options,
+                         help="Local models are served by Ollama; the answer may cite only "
+                              "the evidence JSON. Claude appears when ANTHROPIC_API_KEY is set.")
+    if ollama_problem:
+        st.caption(f"⚠️ {ollama_problem}")
 
 t_start = t_min + offset * 10**9
 t_end = min(t_start + length * 10**9, t_start + MAX_WINDOW_NS)
@@ -218,12 +279,33 @@ with st.chat_message("assistant"):
                 + (" — ⚠️ *truncated, raise max_events or narrow the window*" if result.truncated else "")
                 + ".")
     st.markdown(summary_markdown(findings, focus, evidence["sources"]))
-    if use_claude:
-        with st.spinner("Asking Claude…"):
-            try:
-                st.markdown("---\n**Claude's explanation**\n\n" + ask_claude(evidence, query))
-            except Exception as exc:
-                st.error(f"Claude call failed: {exc}")
+    if model != NO_MODEL:
+        # Keep each answer so moving a widget does not re-ask the model.
+        key = (model, query, json.dumps(evidence, sort_keys=True))
+        answers = st.session_state.setdefault("answers", {})
+        st.markdown(f"---\n**{model} explanation**")
+        try:
+            if key in answers:
+                st.markdown(answers[key])
+            elif model == CLAUDE:
+                with st.spinner("Asking Claude…"):
+                    answers[key] = ask_claude(evidence, query)
+                st.markdown(answers[key])
+            else:
+                status = st.status(f"Asking {model} (the first question also loads the model)…")
+                reasoning_box, answer_box = status.empty(), st.empty()
+                text = {"thinking": "", "answer": ""}
+                for kind, chunk in ask_ollama(model, local[model], evidence, query):
+                    text[kind] += chunk
+                    if kind == "thinking":
+                        reasoning_box.markdown(text["thinking"])
+                    else:
+                        answer_box.markdown(text["answer"])
+                status.update(label=f"{model} reasoning" if text["thinking"] else f"{model} done",
+                              state="complete", expanded=False)
+                answers[key] = text["answer"]
+        except Exception as exc:
+            st.error(f"{model} call failed: {exc}")
 
 tab_tl, tab_find, tab_json = st.tabs(["Timeline per drone", "Findings table", "Evidence JSON"])
 with tab_tl:

@@ -1,5 +1,6 @@
 """Streamlit front end for the FSS demo: pick a scenario, ask your own question,
-see the full report with one tab per part.
+see the full report with one tab per part. Live answers come from a small local model
+(default qwen2.5:3b) served by Ollama; the stub replays each scenario's stored answer.
 
     streamlit run app.py --server.address 127.0.0.1 --server.port 8501
 
@@ -7,10 +8,11 @@ Scenarios run in-process (scenarios.run_scenario with the typed question). Y02 a
 are special demo runs, so they go through demo/run_demo.py.
 """
 import dataclasses
-import os
+import json
 import re
 import subprocess
 import sys
+import urllib.request
 from pathlib import Path
 
 import streamlit as st
@@ -18,7 +20,7 @@ import streamlit as st
 ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
 
-from fss_py.llm import LLMError, StubLLM  # noqa: E402
+from fss_py.llm import LLMError, OllamaLLM, StubLLM  # noqa: E402
 from fss_py.presentation import render_investigation  # noqa: E402
 from scenarios import SCENARIOS, run_scenario, stub_answer_json  # noqa: E402
 
@@ -30,29 +32,30 @@ TABS = ["1 Question", "2 Retrieval", "3 Events", "4 Data gaps",
         "5 Knowledge", "6 LLM context", "7 Synthesis", "8 Validator"]
 
 
-def live_available() -> str | None:
-    """None if the live LLM can be used, else the reason it cannot."""
-    if not os.environ.get("FSS_LLM_API_KEY"):
-        return "FSS_LLM_API_KEY is not set"
+@st.cache_data(ttl=30, show_spinner=False)
+def ollama_models() -> tuple[list[str], str | None]:
+    """Models pulled into the local Ollama server, or the reason none can be used."""
+    llm = OllamaLLM()
+    reason = llm.available()
+    if reason and "is not pulled" not in reason:
+        return [], reason
     try:
-        import anthropic  # noqa: F401
-    except ImportError:
-        return "anthropic is not installed (pip install -r requirements-app.txt)"
-    return None
+        with urllib.request.urlopen(f"{llm.url}/api/tags", timeout=3) as r:
+            names = sorted(m["name"] for m in json.load(r).get("models", []))
+    except (OSError, ValueError) as exc:
+        return [], str(exc)
+    return names, None if names else "no model pulled (run: ollama pull qwen2.5:3b)"
 
 
 @st.cache_data(show_spinner=False)
-def run_question(sid: str, question: str, live: bool, short: bool) -> str:
-    """Run one scenario with the given question; return the plain-text report."""
+def run_question(sid: str, question: str, model: str | None, short: bool) -> str:
+    """Run one scenario with the given question; return the plain-text report.
+    model=None uses the stub LLM, otherwise that Ollama model."""
     sc = SCENARIOS[sid]
-    if live:
-        from fss_py.llm import AnthropicLLM
-        llm = AnthropicLLM()
-    else:
-        llm = StubLLM(stub_answer_json(sc))
+    llm = OllamaLLM(model) if model else StubLLM(stub_answer_json(sc))
     inv = run_scenario(dataclasses.replace(sc, query=question), llm,
-                       max_context_requests=0 if live else 1)
-    who = f"live, {llm.model}" if live else "stub (canned answer stored with the scenario)"
+                       max_context_requests=0 if model else 1)
+    who = f"live, {model} (local, Ollama)" if model else "stub (canned answer stored with the scenario)"
     line = "=" * 80
     head = f"{line}\n  {sid} | {sc.pack} | {sc.title}\n{line}\nProves: {sc.proves}\nLLM: {who}\n"
     return head + render_investigation(inv, source_names=sc.source_names, colour=False,
@@ -140,35 +143,40 @@ if sid in SPECIAL:
         st.info("Press Run in the sidebar.")
 else:
     sc = SCENARIOS[sid]
-    unavailable = live_available()
-    mode = st.sidebar.radio("LLM", ["Stub (offline, canned answer)", "Live Claude"],
-                            help=unavailable or "Uses FSS_LLM_API_KEY; each run is a paid API call.")
-    live = mode == "Live Claude"
-    if live and unavailable:
-        st.sidebar.error(f"Live LLM not available: {unavailable}")
+    models, unavailable = ollama_models()
+    mode = st.sidebar.radio("LLM", ["Live LLM (local Qwen)", "Stub (offline, canned answer)"])
+    live = mode.startswith("Live")
+    model = None
+    if live:
+        if unavailable:
+            st.sidebar.error(f"Live LLM not available: {unavailable}")
+        else:
+            default = models.index("qwen2.5:3b") if "qwen2.5:3b" in models else 0
+            model = st.sidebar.selectbox("Model", models, index=default,
+                                         help="Runs on this server's CPU. No API key needed.")
 
     with st.form("ask"):
         question = st.text_area("Your question", value=sc.query, height=80)
         st.caption(f"Data: {sc.pack}, the scenario's fixed time window. "
-                   f"Default question: “{sc.query}”")
+                   f"Example question: \u201c{sc.query}\u201d")
         submitted = st.form_submit_button("Investigate", type="primary",
-                                          disabled=live and bool(unavailable))
+                                          disabled=live and model is None)
     if submitted:
         question = question.strip()
         if not question:
             st.error("Type a question first.")
         else:
             if not live and question != sc.query:
-                st.warning("The stub LLM replays the answer stored for the default question, so "
-                           "part 7 will not answer your question. Your question still drives "
-                           "parts 1, 5 and 6 (question, knowledge ranking, LLM context). "
-                           "Choose Live Claude for a real answer.")
+                st.warning("The stub LLM replays the answer stored for the example question, so "
+                           "part 7 will not answer your question. Choose Live LLM for a real "
+                           "answer.")
             try:
-                with st.spinner("Investigating..."):
-                    out = run_question(sid, question, live, short)
+                with st.spinner(f"Investigating with {model}... (about 30-90 s on CPU)"
+                                if live else "Investigating..."):
+                    out = run_question(sid, question, model, short)
             except LLMError as exc:
                 st.error(f"LLM call failed: {exc}")
             else:
                 show_report(out)
     else:
-        st.info("Type a question (or keep the default) and press Investigate.")
+        st.info("Type a question (or keep the example) and press Investigate.")
