@@ -38,16 +38,24 @@ class JavaRetriever:
         classpath: str | None = None,
         java_bin: str = "java",
     ) -> None:
-        self.store_path = Path(store_path).resolve()
+        root = Path(__file__).resolve().parent.parent
+        self.root = root
+
+        store_p = Path(store_path)
+        self.store_path = store_p if store_p.is_absolute() else (root / store_p).resolve()
         self.java_bin = java_bin
 
         if classpath is None:
-            root = Path(__file__).resolve().parent.parent
             core_classes = root / "fss-core" / "target" / "classes"
             bridge_classes = root / "bridge" / "classes"
             self.classpath = f"{core_classes}:{bridge_classes}"
         else:
-            self.classpath = classpath
+            resolved_entries = []
+            for entry in classpath.split(":"):
+                if entry:
+                    ep = Path(entry)
+                    resolved_entries.append(str(ep if ep.is_absolute() else (root / ep).resolve()))
+            self.classpath = ":".join(resolved_entries)
 
     @classmethod
     def from_fixtures(
@@ -82,7 +90,9 @@ class JavaRetriever:
             str(self.store_path),
         ]
         for p in fixture_paths:
-            cmd.extend(["--fixture", str(p)])
+            fp = Path(p)
+            resolved_fp = fp if fp.is_absolute() else (self.root / fp).resolve()
+            cmd.extend(["--fixture", str(resolved_fp)])
 
         proc = subprocess.run(
             cmd,
@@ -90,6 +100,7 @@ class JavaRetriever:
             stderr=subprocess.PIPE,
             text=True,
             check=False,
+            cwd=str(self.root),
         )
         if proc.returncode != 0:
             raise RuntimeError(
@@ -141,6 +152,7 @@ class JavaRetriever:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=False,
+            cwd=str(self.root),
         )
         if proc.returncode != 0:
             err_msg = proc.stderr.decode("utf-8", errors="replace")
@@ -149,14 +161,23 @@ class JavaRetriever:
             )
 
         raw = proc.stdout
-        nl_pos = raw.find(b"\n")
+        # Robust JSON metadata header search: find line starting with b'{"truncated"'
+        header_start = raw.find(b'{"truncated"')
+        if header_start == -1:
+            err_msg = proc.stderr.decode("utf-8", errors="replace")
+            stdout_sample = raw[:500].decode("utf-8", errors="replace")
+            raise RuntimeError(
+                f"JavaStoreBridge output missing JSON metadata header:\nstdout:\n{stdout_sample}\nstderr:\n{err_msg}"
+            )
+
+        nl_pos = raw.find(b"\n", header_start)
         if nl_pos == -1:
             err_msg = proc.stderr.decode("utf-8", errors="replace")
             raise RuntimeError(
                 f"JavaStoreBridge output missing metadata header newline:\n{err_msg}"
             )
 
-        header_bytes = raw[:nl_pos]
+        header_bytes = raw[header_start:nl_pos]
         envelope_bytes = raw[nl_pos + 1 :]
 
         try:

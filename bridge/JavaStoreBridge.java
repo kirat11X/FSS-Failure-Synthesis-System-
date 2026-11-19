@@ -18,6 +18,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Non-invasive Java-to-Python bridge CLI.
@@ -72,6 +73,41 @@ public final class JavaStoreBridge {
         System.out.println("                       [--max-events <n>] [--python <bin>] [--schema <yaml>]");
     }
 
+    private static Path findProjectRoot() {
+        // 1. Check FSS_ROOT environment variable
+        String envRoot = System.getenv("FSS_ROOT");
+        if (envRoot != null && !envRoot.isBlank()) {
+            Path p = Path.of(envRoot).toAbsolutePath().normalize();
+            if (Files.exists(p.resolve("schemas/drone_v0.yaml")) && Files.exists(p.resolve("bridge"))) {
+                return p;
+            }
+        }
+
+        // 2. Check current working directory
+        Path currentDir = Path.of(System.getProperty("user.dir")).toAbsolutePath().normalize();
+        if (Files.exists(currentDir.resolve("schemas/drone_v0.yaml")) && Files.exists(currentDir.resolve("bridge"))) {
+            return currentDir;
+        }
+
+        // 3. Check code source location of JavaStoreBridge.class
+        try {
+            var codeSource = JavaStoreBridge.class.getProtectionDomain().getCodeSource();
+            if (codeSource != null && codeSource.getLocation() != null) {
+                Path loc = Path.of(codeSource.getLocation().toURI()).toAbsolutePath().normalize();
+                Path cur = loc;
+                while (cur != null) {
+                    if (Files.exists(cur.resolve("schemas/drone_v0.yaml")) && Files.exists(cur.resolve("bridge"))) {
+                        return cur;
+                    }
+                    cur = cur.getParent();
+                }
+            }
+        } catch (Exception ignored) {
+        }
+
+        return currentDir;
+    }
+
     private static void runIngest(String[] args) throws IOException {
         String storePath = null;
         List<String> fixtures = new ArrayList<>();
@@ -99,11 +135,19 @@ public final class JavaStoreBridge {
             System.exit(1);
         }
 
+        Path projectRoot = findProjectRoot();
         Path sPath = Path.of(storePath);
+        if (!sPath.isAbsolute()) {
+            sPath = Files.exists(sPath) ? sPath.toAbsolutePath() : projectRoot.resolve(sPath);
+        }
+
         int totalIngested = 0;
         try (BlockStore store = BlockStore.open(sPath)) {
             for (String f : fixtures) {
                 Path fPath = Path.of(f);
+                if (!fPath.isAbsolute()) {
+                    fPath = Files.exists(fPath) ? fPath.toAbsolutePath() : projectRoot.resolve(fPath);
+                }
                 if (!Files.exists(fPath)) {
                     System.err.println("Warning: fixture file not found: " + f);
                     continue;
@@ -168,7 +212,11 @@ public final class JavaStoreBridge {
             System.exit(1);
         }
 
+        Path projectRoot = findProjectRoot();
         Path sPath = Path.of(storePath);
+        if (!sPath.isAbsolute()) {
+            sPath = Files.exists(sPath) ? sPath.toAbsolutePath() : projectRoot.resolve(sPath);
+        }
         if (!Files.exists(sPath)) {
             System.err.println("Error: Store file not found: " + sPath);
             System.exit(1);
@@ -205,11 +253,20 @@ public final class JavaStoreBridge {
         int maxEvents = 100;
         String pythonBin = null;
         String schemaPath = "schemas/drone_v0.yaml";
+        String jsonOutFile = null;
+        boolean jsonOut = false;
 
         for (int i = 1; i < args.length; i++) {
             switch (args[i]) {
                 case "--store" -> storePath = args[++i];
                 case "--fixture" -> fixturePath = args[++i];
+                case "--scenario" -> {
+                    String sc = args[++i];
+                    if (!sc.endsWith(".bin")) {
+                        sc = sc + ".bin";
+                    }
+                    fixturePath = sc.startsWith("fixtures/") ? sc : "fixtures/golden/" + sc;
+                }
                 case "--query" -> query = args[++i];
                 case "--source" -> sourceStr = args[++i];
                 case "--start" -> startStr = args[++i];
@@ -218,18 +275,30 @@ public final class JavaStoreBridge {
                 case "--max-events" -> maxEvents = Integer.parseInt(args[++i]);
                 case "--python" -> pythonBin = args[++i];
                 case "--schema" -> schemaPath = args[++i];
+                case "--json-out" -> {
+                    if (i + 1 < args.length && !args[i + 1].startsWith("--")) {
+                        jsonOutFile = args[++i];
+                    } else {
+                        jsonOut = true;
+                    }
+                }
             }
         }
 
-        // Auto-provision store if fixture provided
+        Path projectRoot = findProjectRoot();
+
+        // Auto-provision store if fixture provided or default
         Path sPath;
         if (storePath != null) {
             sPath = Path.of(storePath);
+            if (!sPath.isAbsolute()) {
+                sPath = Files.exists(sPath) ? sPath.toAbsolutePath() : projectRoot.resolve(sPath);
+            }
         } else {
             if (fixturePath == null) {
                 fixturePath = "fixtures/golden/scenario_298_474.bin";
             }
-            Path bridgeDir = Path.of("bridge");
+            Path bridgeDir = projectRoot.resolve("bridge");
             Files.createDirectories(bridgeDir);
             String fixName = Path.of(fixturePath).getFileName().toString();
             if (fixName.endsWith(".bin")) {
@@ -241,6 +310,9 @@ public final class JavaStoreBridge {
         // If fixture given and store doesn't exist or is empty, ingest fixture
         if (fixturePath != null) {
             Path fPath = Path.of(fixturePath);
+            if (!fPath.isAbsolute()) {
+                fPath = Files.exists(fPath) ? fPath.toAbsolutePath() : projectRoot.resolve(fPath);
+            }
             if (!Files.exists(sPath) || Files.size(sPath) == 0) {
                 System.err.printf("[JavaStoreBridge] Initializing store %s with fixture %s...%n", sPath, fPath);
                 try (BlockStore store = BlockStore.open(sPath)) {
@@ -266,33 +338,46 @@ public final class JavaStoreBridge {
         }
 
         // Resolve Python executable
-        String python = resolvePython(pythonBin);
+        String python = resolvePython(pythonBin, projectRoot);
+
+        // Resolve schema path
+        Path scPath = Path.of(schemaPath);
+        if (!scPath.isAbsolute()) {
+            scPath = Files.exists(scPath) ? scPath.toAbsolutePath() : projectRoot.resolve(scPath);
+        }
 
         // Prepare ProcessBuilder for bridge/pipeline_runner.py
+        Path runnerPath = projectRoot.resolve("bridge/pipeline_runner.py");
         List<String> cmd = new ArrayList<>();
         cmd.add(python);
-        cmd.add("bridge/pipeline_runner.py");
+        cmd.add(runnerPath.toAbsolutePath().toString());
         cmd.add("--query"); cmd.add(query);
         cmd.add("--start"); cmd.add(Long.toUnsignedString(tStart));
         cmd.add("--end"); cmd.add(Long.toUnsignedString(tEnd));
         cmd.add("--source"); cmd.add(sourceStr);
         cmd.add("--max-events"); cmd.add(String.valueOf(maxEvents));
         cmd.add("--truncated"); cmd.add(String.valueOf(res.truncated()));
-        cmd.add("--schema"); cmd.add(schemaPath);
+        cmd.add("--schema"); cmd.add(scPath.toAbsolutePath().toString());
         if (eventType != null) {
             cmd.add("--event-type"); cmd.add(String.valueOf(eventType));
+        }
+        if (jsonOutFile != null) {
+            cmd.add("--json-out"); cmd.add(jsonOutFile);
+        } else if (jsonOut) {
+            cmd.add("--json-out");
         }
 
         System.err.printf("[JavaStoreBridge] Spawning Python pipeline: %s%n%n", String.join(" ", cmd));
 
         ProcessBuilder pb = new ProcessBuilder(cmd);
+        pb.directory(projectRoot.toFile());
         pb.redirectOutput(ProcessBuilder.Redirect.INHERIT);
         pb.redirectError(ProcessBuilder.Redirect.INHERIT);
 
         Map<String, String> pbEnv = pb.environment();
-        String currentDir = System.getProperty("user.dir");
+        String rootStr = projectRoot.toAbsolutePath().toString();
         String existingPyPath = pbEnv.get("PYTHONPATH");
-        pbEnv.put("PYTHONPATH", existingPyPath == null ? currentDir : currentDir + ":" + existingPyPath);
+        pbEnv.put("PYTHONPATH", existingPyPath == null ? rootStr : rootStr + ":" + existingPyPath);
 
         Process proc = pb.start();
 
@@ -303,9 +388,29 @@ public final class JavaStoreBridge {
                 os.write(envelope);
             }
             os.flush();
+        } catch (IOException ioe) {
+            System.err.println("[JavaStoreBridge] Notice: Python process closed stdin: " + ioe.getMessage());
         }
 
-        int exitCode = proc.waitFor();
+        boolean finished = false;
+        int exitCode = 1;
+        try {
+            finished = proc.waitFor(300, TimeUnit.SECONDS);
+            if (!finished) {
+                System.err.println("[JavaStoreBridge] Error: Python pipeline timed out after 300 seconds, terminating forcibly...");
+                proc.destroyForcibly();
+                proc.waitFor(5, TimeUnit.SECONDS);
+                exitCode = 124;
+            } else {
+                exitCode = proc.exitValue();
+            }
+        } catch (InterruptedException ie) {
+            System.err.println("[JavaStoreBridge] Interrupted while waiting for Python pipeline, terminating forcibly...");
+            proc.destroyForcibly();
+            Thread.currentThread().interrupt();
+            exitCode = 130;
+        }
+
         if (exitCode != 0) {
             System.err.println("[JavaStoreBridge] Pipeline runner exited with code " + exitCode);
             System.exit(exitCode);
@@ -327,7 +432,7 @@ public final class JavaStoreBridge {
     }
 
     private static long findMinTs(BlockStore store) {
-        long min = Long.MAX_VALUE;
+        long min = -1L; // 0xFFFFFFFFFFFFFFFFL unsigned max
         boolean found = false;
         for (BlockInfo b : store.blocks()) {
             if (!b.empty() && b.recordCount() > 0) {
@@ -384,18 +489,77 @@ public final class JavaStoreBridge {
         return Integer.parseInt(text);
     }
 
-    private static String resolvePython(String candidate) {
-        if (candidate != null && Files.exists(Path.of(candidate))) {
-            return candidate;
+    private static String resolvePython(String candidate, Path projectRoot) {
+        // 1. Explicit candidate argument
+        if (candidate != null && !candidate.isBlank()) {
+            Path candPath = Path.of(candidate);
+            if (!candPath.isAbsolute()) {
+                Path fromRoot = projectRoot.resolve(candPath);
+                if (Files.exists(fromRoot)) {
+                    return fromRoot.toAbsolutePath().toString();
+                }
+            }
+            if (Files.exists(candPath) || canExecute(candidate)) {
+                return candidate;
+            }
         }
-        Path venvPy = Path.of(".venv/bin/python");
-        if (Files.exists(venvPy)) {
+
+        // 2. PATH lookup (command lookup or testing binary execution)
+        String envPath = System.getenv("PATH");
+        if (envPath != null) {
+            for (String dir : envPath.split(java.io.File.pathSeparator)) {
+                if (!dir.isBlank()) {
+                    Path p3 = Path.of(dir).resolve("python3");
+                    if (Files.isExecutable(p3)) {
+                        return p3.toAbsolutePath().toString();
+                    }
+                    Path p = Path.of(dir).resolve("python");
+                    if (Files.isExecutable(p)) {
+                        return p.toAbsolutePath().toString();
+                    }
+                }
+            }
+        }
+
+        // 3. PYTHON environment variable
+        String envPython = System.getenv("PYTHON");
+        if (envPython != null && !envPython.isBlank()) {
+            Path ep = Path.of(envPython);
+            if (Files.exists(ep) || canExecute(envPython)) {
+                return envPython;
+            }
+        }
+
+        // 4. Virtual environment relative to projectRoot
+        Path venvPy = projectRoot.resolve(".venv/bin/python");
+        if (Files.exists(venvPy) && Files.isExecutable(venvPy)) {
             return venvPy.toAbsolutePath().toString();
         }
-        Path venvPy3 = Path.of(".venv/bin/python3");
-        if (Files.exists(venvPy3)) {
+        Path venvPy3 = projectRoot.resolve(".venv/bin/python3");
+        if (Files.exists(venvPy3) && Files.isExecutable(venvPy3)) {
             return venvPy3.toAbsolutePath().toString();
         }
+
+        // 5. Test execution or fallback
+        if (canExecute("python3")) {
+            return "python3";
+        }
+        if (canExecute("python")) {
+            return "python";
+        }
+
         return "python3";
+    }
+
+    private static boolean canExecute(String bin) {
+        try {
+            Process p = new ProcessBuilder(bin, "--version")
+                    .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                    .redirectError(ProcessBuilder.Redirect.DISCARD)
+                    .start();
+            return p.waitFor(3, TimeUnit.SECONDS) && p.exitValue() == 0;
+        } catch (Exception e) {
+            return false;
+        }
     }
 }

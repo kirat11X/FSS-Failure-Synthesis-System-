@@ -8,6 +8,10 @@ Tests:
   5. Synthesizer reasoning, citation validation & hallucination detection.
   6. Pipeline runner 8-part report generation & JSON output.
   7. End-to-end Java -> Python ProcessBuilder pipeline invocation.
+  8. Validator catches invalid/non-hex hallucinated IDs ([ev-fake], [ev-12345], [drone-298]).
+  9. Empty (0-event) pipeline execution and deterministic synthesis.
+ 10. Truncated retrieval data gap handling (event_id is None).
+ 11. JavaStoreBridge dynamic project root resolution from arbitrary working directory.
 """
 
 from __future__ import annotations
@@ -33,7 +37,7 @@ from bridge.synthesizer import (
 )
 from fss_py.decoder import decode_all
 from fss_py.evidence import build_evidence
-from fss_py.model import ALL, RetrievalRequest, RetrievalRequestError
+from fss_py.model import ALL, RetrievalRequest, RetrievalRequestError, RetrievalResult
 from fss_py.schema import load_schema_file
 from fss_py.wire import iter_envelopes
 
@@ -241,6 +245,132 @@ class TestBridge(unittest.TestCase):
         self.assertIn("[7] Synthesis", out)
         self.assertIn("[8] Validator", out)
         self.assertIn("Verdict:** ACCEPTED", out)
+
+    def test_07_validator_catches_non_hex_and_malformed_hallucinations(self):
+        """Verify validator catches [ev-fake], [ev-12345], and [drone-298] as invalid citations."""
+        raw_bytes = self.fixture_path.read_bytes()
+        events = list(iter_envelopes(raw_bytes))
+        decoded = decode_all(events, self.schema)
+        evidence = build_evidence(decoded, query="Check hallucinations")
+
+        bad_synth = {
+            "summary": "Drone left formation [ev-fake] after collision alert [ev-12345] on drone [drone-298].",
+            "likely_cause": "Hypothetical fault [ev-nonhexid0000].",
+            "confidence": "high",
+            "contributing_events": [
+                {"source_id": 298, "timestamp": 0, "event_type": "LIDAR", "event_id": "ev-fake"}
+            ],
+            "uncertainty": [],
+            "data_gaps": [],
+        }
+
+        val = validate_synthesis(bad_synth, evidence)
+        self.assertEqual(val.verdict, "REJECTED")
+        self.assertIn("ev-fake", val.invalid_citations)
+        self.assertIn("ev-12345", val.invalid_citations)
+        self.assertIn("drone-298", val.invalid_citations)
+        self.assertIn("ev-nonhexid0000", val.invalid_citations)
+
+    def test_08_empty_events_pipeline_and_synthesis(self):
+        """Verify 0-event retrieval produces a valid, accepted 0-event report."""
+        req = RetrievalRequest(
+            source=ALL,
+            t_start_ns=1000,
+            t_end_ns=2000,
+            max_events=100,
+        )
+        ret_res = RetrievalResult(request=req, events=[], truncated=False)
+        evidence = build_evidence([], query="Why did drone 474 leave?", retrieval=ret_res)
+
+        synth, val, model = synthesize_and_validate(evidence, "Why did drone 474 leave?")
+        self.assertEqual(val.verdict, "ACCEPTED")
+        self.assertEqual(synth["summary"], "No events recorded or retrieved in the requested time window.")
+        self.assertIsNone(synth["likely_cause"])
+        self.assertEqual(synth["contributing_events"], [])
+
+        # Also test via pipeline_runner --json-out with empty stdin
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "bridge/pipeline_runner.py",
+                "--query",
+                "Why did drone leave?",
+                "--start",
+                "1000",
+                "--end",
+                "2000",
+                "--json-out",
+            ],
+            input="",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True,
+        )
+        data = json.loads(proc.stdout)
+        self.assertEqual(len(data["evidence"]["events"]), 0)
+        self.assertEqual(data["validation"]["verdict"], "ACCEPTED")
+        self.assertEqual(
+            data["synthesis"]["summary"],
+            "No events recorded or retrieved in the requested time window.",
+        )
+
+    def test_09_retrieval_truncated_data_gap_coverage(self):
+        """Verify validator handles RETRIEVAL_TRUNCATED data gaps where event_id is None."""
+        req = RetrievalRequest(
+            source=ALL,
+            t_start_ns=1791454020000000000,
+            t_end_ns=1791454030000000000,
+            max_events=2,
+        )
+        raw_bytes = self.fixture_path.read_bytes()
+        events = list(iter_envelopes(raw_bytes))[:2]
+        ret_res = RetrievalResult(request=req, events=events, truncated=True)
+        decoded = decode_all(events, self.schema)
+        evidence = build_evidence(decoded, query="Truncated test", retrieval=ret_res)
+
+        # Confirm evidence has RETRIEVAL_TRUNCATED gap with event_id=None
+        trunc_gaps = [g for g in evidence["data_gaps"] if g.get("kind") == "RETRIEVAL_TRUNCATED"]
+        self.assertEqual(len(trunc_gaps), 1)
+        self.assertIsNone(trunc_gaps[0]["event_id"])
+
+        # Synthesis that omitted the data gap should be accepted with corrections, restoring it
+        incomplete_synth = {
+            "summary": "Truncated events observed.",
+            "likely_cause": None,
+            "confidence": "high",
+            "contributing_events": [],
+            "uncertainty": [],
+            "data_gaps": [],
+        }
+        val = validate_synthesis(incomplete_synth, evidence)
+        self.assertEqual(val.verdict, "ACCEPTED_WITH_CORRECTIONS")
+        self.assertTrue(any("RETRIEVAL_TRUNCATED" in note for note in val.notes))
+        self.assertTrue(any("RETRIEVAL_TRUNCATED" in g for g in val.corrected_synthesis["data_gaps"]))
+
+    def test_10_java_pipeline_from_arbitrary_cwd(self):
+        """Verify JavaStoreBridge resolves projectRoot dynamically when run from /tmp."""
+        cp = f"{ROOT_DIR}/fss-core/target/classes:{ROOT_DIR}/bridge/classes"
+        proc = subprocess.run(
+            [
+                "java",
+                "-cp",
+                cp,
+                "bridge.JavaStoreBridge",
+                "pipeline",
+                "--fixture",
+                str(self.fixture_path),
+                "--query",
+                "Testing from /tmp",
+            ],
+            cwd="/tmp",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True,
+        )
+        self.assertIn("FAILURE SYNTHESIS SYSTEM (FSS) END-TO-END REPORT", proc.stdout)
+        self.assertIn("Verdict:** ACCEPTED", proc.stdout)
 
 
 if __name__ == "__main__":

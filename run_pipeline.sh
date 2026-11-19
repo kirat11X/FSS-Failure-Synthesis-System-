@@ -17,7 +17,7 @@ if [ ! -f "bridge/classes/bridge/JavaStoreBridge.class" ]; then
     bridge/compile.sh
 fi
 
-CP="fss-core/target/classes:bridge/classes"
+CP="${ROOT_DIR}/fss-core/target/classes:${ROOT_DIR}/bridge/classes"
 JAVA_BIN="${JAVA_HOME:-/usr}/bin/java"
 if [ ! -x "$JAVA_BIN" ]; then
     JAVA_BIN="java"

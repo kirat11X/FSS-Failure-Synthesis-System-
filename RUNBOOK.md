@@ -12,6 +12,15 @@ To execute the end-to-end linked system (ingesting/opening the durable Java `Blo
 ./run_pipeline.sh
 ```
 
+### Web Dashboard & Live Service Launch
+
+To launch the full interactive web application (connecting the Streamlit UI to the Java `BlockStore` engine and Python Qwen RAG pipeline):
+
+```bash
+./start_all.sh
+```
+*Access the live dashboard in your browser:* `http://127.0.0.1:8501` (or specify `PORT=8502 ./start_all.sh`).
+
 ### What Happens Automatically
 When `./run_pipeline.sh` is executed without arguments:
 1. **Environment Configuration**: Sources `fss_env.sh` (or `.env`) to set `JAVA_HOME`, `PYTHONPATH`, classpath, and model paths.

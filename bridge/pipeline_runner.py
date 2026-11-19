@@ -99,39 +99,42 @@ def render_report(
 
     # [3] Events
     lines.append("[3] Events")
-    lines.append(f"Sources involved: {', '.join(map(str, sources))}")
+    lines.append(f"Sources involved: {', '.join(map(str, sources)) if sources else 'none'}")
     lines.append(evidence.get("ordering", "Grouped by source, producer time within each source."))
     if evidence.get("clock_caveat"):
         lines.append(f"⏱️ {evidence['clock_caveat']}")
     lines.append("")
 
-    col_fmt = "{:<10} | {:<23} | {:<16} | {:<18} | {:<26} | {:<15} | {}"
-    lines.append(
-        col_fmt.format(
-            "Source",
-            "Producer Time (UTC)",
-            "Event Type",
-            "Decode Status",
-            "Epistemic Tag",
-            "Event ID",
-            "Fields",
-        )
-    )
-    lines.append("-" * 125)
-
-    for ev in events:
-        f_str = ", ".join(f"{k}={v}" for k, v in ev.get("fields", {}).items())
+    if events:
+        col_fmt = "{:<10} | {:<23} | {:<16} | {:<18} | {:<26} | {:<15} | {}"
         lines.append(
             col_fmt.format(
-                str(ev["source_id"]),
-                fmt_ns(ev["timestamp_ns"]),
-                ev.get("event_name") or ev.get("event_type"),
-                ev.get("decode_status"),
-                epistemic_tag(ev),
-                ev["event_id"],
-                f_str,
+                "Source",
+                "Producer Time (UTC)",
+                "Event Type",
+                "Decode Status",
+                "Epistemic Tag",
+                "Event ID",
+                "Fields",
             )
         )
+        lines.append("-" * 125)
+
+        for ev in events:
+            f_str = ", ".join(f"{k}={v}" for k, v in ev.get("fields", {}).items())
+            lines.append(
+                col_fmt.format(
+                    str(ev["source_id"]),
+                    fmt_ns(ev["timestamp_ns"]),
+                    ev.get("event_name") or ev.get("event_type"),
+                    ev.get("decode_status"),
+                    epistemic_tag(ev),
+                    ev["event_id"],
+                    f_str,
+                )
+            )
+    else:
+        lines.append("(No events retrieved in this time window)")
     lines.append("")
 
     # [4] Data gaps
@@ -172,21 +175,33 @@ def render_report(
 
     lines.append("**Contributing events** (verified against evidence):")
     valid_set = set(val_report.valid_citations)
-    for ce in synthesis.get("contributing_events", []):
-        eid = ce.get("event_id", "")
-        mark = "✓" if eid in valid_set else "✗ NOT IN EVIDENCE"
-        ts_str = f" at {fmt_ns(ce['timestamp'])}" if ce.get("timestamp") else ""
-        lines.append(f"- {mark} {eid}: Source {ce.get('source_id')} {ce.get('event_type')}{ts_str}")
+    contributing = synthesis.get("contributing_events", [])
+    if contributing:
+        for ce in contributing:
+            eid = ce.get("event_id", "")
+            mark = "✓" if eid in valid_set else "✗ NOT IN EVIDENCE"
+            ts_str = f" at {fmt_ns(ce['timestamp'])}" if ce.get("timestamp") else ""
+            lines.append(f"- {mark} {eid}: Source {ce.get('source_id')} {ce.get('event_type')}{ts_str}")
+    else:
+        lines.append("- None")
     lines.append("")
 
     lines.append("**Uncertainty:**")
-    for u in synthesis.get("uncertainty", []):
-        lines.append(f"- {u}")
+    uncertainties = synthesis.get("uncertainty", [])
+    if uncertainties:
+        for u in uncertainties:
+            lines.append(f"- {u}")
+    else:
+        lines.append("- None")
     lines.append("")
 
     lines.append("**Reported Data Gaps:**")
-    for dg in synthesis.get("data_gaps", []):
-        lines.append(f"- {dg}")
+    data_gaps = synthesis.get("data_gaps", [])
+    if data_gaps:
+        for dg in data_gaps:
+            lines.append(f"- {dg}")
+    else:
+        lines.append("- None")
     lines.append("")
 
     # [8] Validator
@@ -223,34 +238,48 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-events", type=int, default=100, help="Retrieval max_events")
     parser.add_argument("--truncated", type=lambda s: s.lower() == "true", default=False, help="Whether retrieval was truncated")
     parser.add_argument("--event-type", type=int, default=None, help="Retrieval event_type filter")
-    parser.add_argument("--json-out", action="store_true", help="Print raw JSON instead of 8-part report")
+    parser.add_argument(
+        "--json-out",
+        nargs="?",
+        const=True,
+        default=False,
+        help="Print raw JSON or write to specified file path",
+    )
 
     args = parser.parse_args(argv)
 
     # 1. Read envelope stream
     if args.file:
-        raw_bytes = Path(args.file).read_bytes()
+        file_path = Path(args.file)
+        if not file_path.is_absolute():
+            file_path = ROOT_DIR / file_path
+        raw_bytes = file_path.read_bytes() if file_path.exists() else b""
     else:
         raw_bytes = sys.stdin.buffer.read()
 
-    if not raw_bytes:
-        print("Error: No envelope data received on stdin or file", file=sys.stderr)
-        return 1
+    # 2. Decode wire envelopes if data exists; otherwise allow 0-event retrieval
+    if raw_bytes:
+        events = list(iter_envelopes(raw_bytes))
+    else:
+        events = []
 
-    # 2. Decode wire envelopes
-    events = list(iter_envelopes(raw_bytes))
-
-    # 3. Load schema & decode payloads
-    registry = load_schema_file(args.schema)
+    # 3. Load schema & decode payloads (schema resolved relative to project root)
+    schema_path = Path(args.schema)
+    if not schema_path.is_absolute():
+        schema_path = ROOT_DIR / schema_path
+    registry = load_schema_file(str(schema_path))
     decoded = decode_all(events, registry)
 
     # 4. Reconstruct RetrievalResult for evidence context
     src_val = ALL if args.source.upper() == "ALL" else int(args.source)
     t_start = args.start
     t_end = args.end
-    if t_end <= t_start and events:
-        t_start = min(e.timestamp_ns for e in events)
-        t_end = max(e.timestamp_ns for e in events) + 1_000_000_000
+    if t_end <= t_start:
+        if events:
+            t_start = min(e.timestamp_ns for e in events)
+            t_end = max(e.timestamp_ns for e in events) + 1_000_000_000
+        else:
+            t_end = t_start + 1_000_000_000
 
     req = RetrievalRequest(
         source=src_val,
@@ -269,9 +298,20 @@ def main(argv: list[str] | None = None) -> int:
     synthesis, val_report, model_name = synthesize_and_validate(evidence, args.query)
 
     # 7. Output report or JSON
+    report = render_report(
+        args.query,
+        retrieval_res,
+        evidence,
+        knowledge,
+        synthesis,
+        val_report,
+        model_name,
+    )
+
     if args.json_out:
         out = {
             "evidence": evidence,
+            "knowledge": knowledge,
             "synthesis": synthesis,
             "validation": {
                 "verdict": val_report.verdict,
@@ -280,18 +320,19 @@ def main(argv: list[str] | None = None) -> int:
                 "notes": val_report.notes,
             },
             "model": model_name,
+            "report": report,
         }
-        print(json.dumps(out, indent=2))
+        json_str = json.dumps(out, indent=2)
+        if isinstance(args.json_out, str):
+            out_file = Path(args.json_out)
+            if not out_file.is_absolute():
+                out_file = ROOT_DIR / out_file
+            out_file.parent.mkdir(parents=True, exist_ok=True)
+            out_file.write_text(json_str, encoding="utf-8")
+            print(f"Report JSON written to {out_file}")
+        else:
+            print(json_str)
     else:
-        report = render_report(
-            args.query,
-            retrieval_res,
-            evidence,
-            knowledge,
-            synthesis,
-            val_report,
-            model_name,
-        )
         print(report)
 
     return 0

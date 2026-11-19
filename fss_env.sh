@@ -2,7 +2,8 @@
 # Source this file to set up the FSS development and execution environment:
 #   source fss_env.sh
 
-export FSS_ROOT="/home/kirat/coding/minor"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export FSS_ROOT="${FSS_ROOT:-$SCRIPT_DIR}"
 export PYTHONPATH="${FSS_ROOT}:${PYTHONPATH:-}"
 
 # Python virtual environment (if present)
@@ -12,15 +13,15 @@ if [ -d "${FSS_ROOT}/.venv" ]; then
 fi
 
 # Java Classpath & Runtime
-export JAVA_HOME="/usr/lib/jvm/java-25-openjdk"
+export JAVA_HOME="${JAVA_HOME:-/usr/lib/jvm/java-25-openjdk}"
 export FSS_CORE_CLASSES="${FSS_ROOT}/fss-core/target/classes"
 export FSS_CORE_TEST_CLASSES="${FSS_ROOT}/fss-core/target/test-classes"
 export CLASSPATH="${FSS_CORE_CLASSES}:${FSS_CORE_TEST_CLASSES}:${CLASSPATH:-}"
 
 # LLM and Model Locations
 export OLLAMA_URL="${OLLAMA_URL:-http://127.0.0.1:11434}"
-export LOCAL_MODEL_PATH="/home/kirat/.cache/huggingface/hub/models--Qwen--Qwen2.5-1.5B-Instruct/snapshots/989aa7980e4cf806f80c7fef2b1adb7bc71aa306"
-export QWEN_MODEL_SNAPSHOT="${LOCAL_MODEL_PATH}"
+export LOCAL_MODEL_PATH="${LOCAL_MODEL_PATH:-/home/kirat/.cache/huggingface/hub/models--Qwen--Qwen2.5-1.5B-Instruct/snapshots/989aa7980e4cf806f80c7fef2b1adb7bc71aa306}"
+export QWEN_MODEL_SNAPSHOT="${QWEN_MODEL_SNAPSHOT:-$LOCAL_MODEL_PATH}"
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 
