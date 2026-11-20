@@ -207,22 +207,62 @@ public final class JavaStoreBridge {
     }
 
     private static int ingestEnvelopeStream(BlockStore store, byte[] data) throws IOException {
-        ByteBuffer buf = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN);
+        if (data.length < 2) {
+            return 0;
+        }
+
+        // 1. Check if Contract v0 wire envelope (Little-Endian with MAGIC = EnvelopeCodec.MAGIC = 0xF55A)
+        int firstShort = (data.length >= 2) ? ((data[0] & 0xFF) | ((data[1] & 0xFF) << 8)) : 0;
+        boolean isContractV0 = (firstShort == EnvelopeCodec.MAGIC);
+
+        if (isContractV0) {
+            ByteBuffer buf = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN);
+            int off = 0;
+            int count = 0;
+            while (off < data.length) {
+                if (data.length - off < EnvelopeCodec.ENVELOPE_HEADER_LEN) {
+                    break;
+                }
+                int payloadLen = buf.getInt(off + 20);
+                int recordLen = EnvelopeCodec.ENVELOPE_HEADER_LEN + payloadLen;
+                if (off + recordLen > data.length) {
+                    throw new IOException("Truncated envelope in stream at offset " + off);
+                }
+                EventRecord record = EnvelopeCodec.decodeEnvelope(buf, off, recordLen);
+                store.append(record);
+                count++;
+                off += recordLen;
+            }
+            return count;
+        }
+
+        // 2. Fallback: Parse Big-Endian envelope.cfg format: >IQII (20-byte header: Agent ID, Timestamp, Payload Len, Event Type)
+        ByteBuffer bb = ByteBuffer.wrap(data).order(ByteOrder.BIG_ENDIAN);
         int off = 0;
         int count = 0;
-        while (off < data.length) {
-            if (data.length - off < EnvelopeCodec.ENVELOPE_HEADER_LEN) {
+        while (off + 20 <= data.length) {
+            int agentId = bb.getInt(off);
+            long rawTs = bb.getLong(off + 4);
+            int payloadLen = bb.getInt(off + 12);
+            int eventType = bb.getInt(off + 16);
+
+            if (payloadLen < 0 || payloadLen > EnvelopeCodec.MAX_PAYLOAD_LEN || off + 20 + payloadLen > data.length) {
                 break;
             }
-            int payloadLen = buf.getInt(off + 20);
-            int recordLen = EnvelopeCodec.ENVELOPE_HEADER_LEN + payloadLen;
-            if (off + recordLen > data.length) {
-                throw new IOException("Truncated envelope in stream at offset " + off);
-            }
-            EventRecord record = EnvelopeCodec.decodeEnvelope(buf, off, recordLen);
+
+            // Convert milliseconds to nanoseconds if ts < 10^14
+            long tsNs = (rawTs > 0 && rawTs < 100_000_000_000_000L) ? rawTs * 1_000_000L : rawTs;
+
+            byte[] payload = new byte[payloadLen];
+            System.arraycopy(data, off + 20, payload, 0, payloadLen);
+            EventRecord record = new EventRecord(agentId, tsNs, eventType, payload);
             store.append(record);
             count++;
-            off += recordLen;
+            off += 20 + payloadLen;
+        }
+
+        if (count == 0) {
+            throw new IOException("Unrecognized envelope binary format (neither Contract v0 0x4653 nor envelope.cfg >IQII)");
         }
         return count;
     }

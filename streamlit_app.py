@@ -718,13 +718,25 @@ def main() -> None:
             else:
                 st.warning("No .dat BlockStore files found in bridge/")
         else:
-            uploads = st.file_uploader("Upload wire envelope .bin files", type=["bin"], accept_multiple_files=True)
+            uploads = st.file_uploader("Upload telemetry .bin / .fss.bin files", type=["bin"], accept_multiple_files=True)
             if uploads:
                 for up in uploads:
-                    tmp_file = tempfile.NamedTemporaryFile(suffix=".bin", delete=False)
-                    tmp_file.write(up.getvalue())
-                    tmp_file.close()
-                    chosen_fixtures.append(Path(tmp_file.name))
+                    file_bytes = up.getvalue()
+                    if len(file_bytes) >= 2 and file_bytes[0] == 0xA3 and file_bytes[1] == 0x95:
+                        st.info(f"✈️ Detected ArduPilot DataFlash log ({up.name}). Automatically translating flight telemetry to FSS envelopes...")
+                        from scripts.convert_ardupilot_bin_to_fss import convert_log
+                        with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as raw_tmp:
+                            raw_tmp.write(file_bytes)
+                            raw_path = Path(raw_tmp.name)
+                        fss_path = raw_path.with_suffix(".fss.bin")
+                        convert_log(raw_path, fss_path)
+                        raw_path.unlink(missing_ok=True)
+                        chosen_fixtures.append(fss_path)
+                    else:
+                        tmp_file = tempfile.NamedTemporaryFile(suffix=".bin", delete=False)
+                        tmp_file.write(file_bytes)
+                        tmp_file.close()
+                        chosen_fixtures.append(Path(tmp_file.name))
 
         if st.button("🔄 Refresh / Re-ingest Store", use_container_width=True):
             st.cache_resource.clear()

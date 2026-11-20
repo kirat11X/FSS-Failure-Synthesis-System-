@@ -156,6 +156,28 @@ def send_worker_request(
         sock.close()
 
 
+def resolve_and_convert_fixtures(fixture_paths: tuple[str | Path, ...], root: Path) -> list[str]:
+    """Resolve fixture paths and auto-convert raw ArduPilot DataFlash logs (0xA3 0x95) to .fss.bin."""
+    resolved = []
+    for p in fixture_paths:
+        fp = Path(p)
+        resolved_fp = fp if fp.is_absolute() else (root / fp).resolve()
+        if resolved_fp.exists():
+            try:
+                with open(resolved_fp, "rb") as tf:
+                    head2 = tf.read(2)
+                if len(head2) == 2 and head2[0] == 0xA3 and head2[1] == 0x95:
+                    from scripts.convert_ardupilot_bin_to_fss import convert_log
+                    out_fss = resolved_fp.with_suffix(".fss.bin")
+                    convert_log(resolved_fp, out_fss)
+                    resolved.append(str(out_fss))
+                    continue
+            except Exception:
+                pass
+        resolved.append(str(resolved_fp))
+    return resolved
+
+
 class JavaRetriever:
     """Retriever implementation that queries a Java BlockStore through JavaStoreBridge.
 
@@ -302,11 +324,7 @@ class JavaRetriever:
     def ingest(self, *fixture_paths: str | Path, trace_id: str | None = None) -> None:
         """Ingest wire envelope (.bin) fixtures into this retriever's BlockStore with write locking."""
         tid = bind_trace_id(trace_id)
-        resolved_fixtures: list[str] = []
-        for p in fixture_paths:
-            fp = Path(p)
-            resolved_fp = fp if fp.is_absolute() else (self.root / fp).resolve()
-            resolved_fixtures.append(str(resolved_fp))
+        resolved_fixtures = resolve_and_convert_fixtures(fixture_paths, self.root)
 
         # If in storage_ipc mode, ingest directly using Ingestion.FileIngestor
         if self.mode == "storage_ipc":
@@ -390,14 +408,13 @@ class JavaRetriever:
 
     def ingest_clean(self, *fixture_paths: str | Path, trace_id: str | None = None) -> None:
         """Clean storage directory and ingest wire envelope fixtures."""
+        resolved_fixtures = resolve_and_convert_fixtures(fixture_paths, self.root)
         if self.mode == "storage_ipc":
             if self.storage_properties is None or not self.storage_properties.exists():
                 raise FileNotFoundError(f"Storage properties file not found: {self.storage_properties}")
             tid = bind_trace_id(trace_id)
             first = True
-            for p in fixture_paths:
-                fp = Path(p)
-                resolved_fp = fp if fp.is_absolute() else (self.root / fp).resolve()
+            for rf in resolved_fixtures:
                 cmd = [
                     self.java_bin,
                     "-Dfile.encoding=UTF-8",
@@ -405,7 +422,7 @@ class JavaRetriever:
                     self.classpath,
                     "Ingestion.FileIngestor",
                     str(self.storage_properties),
-                    str(resolved_fp),
+                    rf,
                 ]
                 if not first:
                     cmd.append("--append")
@@ -421,11 +438,11 @@ class JavaRetriever:
                 )
                 if code != 0:
                     err_msg = stderr.decode("utf-8", errors="replace")
-                    raise RuntimeError(f"FileIngestor clean ingest failed for {resolved_fp} (code {code}):\n{err_msg}")
+                    raise RuntimeError(f"FileIngestor clean ingest failed for {rf} (code {code}):\n{err_msg}")
             return
 
         # Fallback to standard ingest
-        self.ingest(*fixture_paths, trace_id=trace_id)
+        self.ingest(*resolved_fixtures, trace_id=trace_id)
 
     def _retrieve_via_storage_ipc(
         self,
