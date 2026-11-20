@@ -64,4 +64,56 @@ event_types:
       - {name: status_code,   offset: 0, type: u16, size: 2, endian: little, enum: diag_status, enum_field: status_name}
       - {name: temperature_c, offset: 2, type: f32, size: 4, endian: little}
 
+  # ArduPilot real-world telemetry mappings
+  0x40:
+    name: ATTITUDE
+    version: 1
+    fields:
+      - {name: roll_deg, offset: 0, type: f32, size: 4, endian: big}
+      - {name: pitch_deg, offset: 4, type: f32, size: 4, endian: big}
+      - {name: yaw_deg, offset: 8, type: f32, size: 4, endian: big}
+
+  0x41:
+    name: GPS_STATUS
+    version: 1
+    fields:
+      - {name: status_code, offset: 0, type: u8, size: 1}
+      - {name: num_sats, offset: 1, type: u8, size: 1}
+      - {name: hdop_cm, offset: 2, type: u16, size: 2, endian: big}
+      - {name: lat_e7, offset: 4, type: i32, size: 4, endian: big}
+      - {name: lng_e7, offset: 8, type: i32, size: 4, endian: big}
+      - {name: alt_cm, offset: 12, type: i32, size: 4, endian: big}
+
+  0x42:
+    name: BATTERY_STATUS
+    version: 1
+    fields:
+      - {name: voltage_v, offset: 0, type: f32, size: 4, endian: big}
+      - {name: current_a, offset: 4, type: f32, size: 4, endian: big}
+      - {name: remaining_pct, offset: 8, type: f32, size: 4, endian: big}
+
+  0x43:
+    name: EKF_STATUS
+    version: 1
+    fields:
+      - {name: compass_variance, offset: 0, type: f32, size: 4, endian: big}
+      - {name: velocity_variance, offset: 4, type: f32, size: 4, endian: big}
+      - {name: position_variance, offset: 8, type: f32, size: 4, endian: big}
+
+  0x44:
+    name: VIBRATION
+    version: 1
+    fields:
+      - {name: vibe_x, offset: 0, type: f32, size: 4, endian: big}
+      - {name: vibe_y, offset: 4, type: f32, size: 4, endian: big}
+      - {name: vibe_z, offset: 8, type: f32, size: 4, endian: big}
+      - {name: clipping, offset: 12, type: u16, size: 2, endian: big}
+
+  0x45:
+    name: ERROR_EVENT
+    version: 1
+    fields:
+      - {name: subsystem_code, offset: 0, type: u16, size: 2, endian: big}
+      - {name: error_code, offset: 2, type: u16, size: 2, endian: big}
+
 # 0x31 is intentionally not configured (UNKNOWN_EVENT_TYPE fixture).

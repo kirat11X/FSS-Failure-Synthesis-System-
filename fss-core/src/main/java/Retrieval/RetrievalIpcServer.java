@@ -15,17 +15,21 @@ public final class RetrievalIpcServer {
 
     private final RetrievalService retrievalService;
     private final ObjectMapper mapper;
+    private final DataInputStream input;
+    private final DataOutputStream output;
 
     public RetrievalIpcServer(RetrievalService retrievalService) {
+        this(retrievalService, System.in, System.out);
+    }
+
+    public RetrievalIpcServer(RetrievalService retrievalService, java.io.InputStream in, java.io.OutputStream out) {
         this.retrievalService = retrievalService;
         this.mapper = new ObjectMapper();
+        this.input = (in instanceof DataInputStream dis) ? dis : new DataInputStream(in);
+        this.output = (out instanceof DataOutputStream dos) ? dos : new DataOutputStream(out);
     }
 
     public void run() throws IOException {
-
-        DataInputStream input = new DataInputStream(System.in);
-
-        DataOutputStream output = new DataOutputStream(System.out);
 
         while (true) {
 

@@ -188,11 +188,23 @@ class CitationAuditor:
         known_events = {e["event_id"]: e for e in events}
         known_docs = set()
         if knowledge:
-            for k in knowledge:
-                if k.get("chunk"):
-                    known_docs.add(k["chunk"])
-                if k.get("id"):
-                    known_docs.add(k["id"])
+            if isinstance(knowledge, dict):
+                for k, v in knowledge.items():
+                    known_docs.add(str(k))
+                    if isinstance(v, dict):
+                        if v.get("chunk"):
+                            known_docs.add(str(v["chunk"]))
+                        if v.get("id"):
+                            known_docs.add(str(v["id"]))
+            elif isinstance(knowledge, (list, tuple, set)):
+                for k in knowledge:
+                    if isinstance(k, dict):
+                        if k.get("chunk"):
+                            known_docs.add(str(k["chunk"]))
+                        if k.get("id"):
+                            known_docs.add(str(k["id"]))
+                    elif isinstance(k, str):
+                        known_docs.add(k)
 
         sources = sorted(evidence.get("sources", []))
         evidence_gaps = evidence.get("data_gaps", [])
@@ -229,7 +241,7 @@ class CitationAuditor:
                 continue
             # If it's a citation attempt (starts with ev-, drone-, source-, event- or in known_events/docs)
             if (
-                token.startswith(("ev-", "drone-", "source-", "event-", "ev_"))
+                token.startswith(("ev-", "drone-", "source-", "event-", "ev_", "doc-"))
                 or token in known_events
                 or token in known_docs
                 or HEX_EVENT_ID_REGEX.match(token)
@@ -672,3 +684,7 @@ def validate_synthesis(
 ) -> ValidationReport:
     """Public validator entrypoint conforming to FSS specification."""
     return _default_auditor.audit(synthesis, evidence, knowledge=knowledge, query=query)
+
+
+# Backward-compatible aliases
+EpistemicCitationAuditor = CitationAuditor

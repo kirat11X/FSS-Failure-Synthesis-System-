@@ -80,12 +80,18 @@ class TestStreamlitRerunDelegation(unittest.TestCase):
         at.run()
         self._verify_all_sections_rendered(at, "Initial Load")
 
-        # Rerun 1: Select single-source filter '474'
-        if len(at.selectbox) >= 2:
-            at.selectbox[1].select("474").run()
+        # Rerun 1: Select single-source filter
+        source_sb = None
+        for sb in at.selectbox:
+            if "ALL" in sb.options and len(sb.options) > 1:
+                source_sb = sb
+                break
+        if source_sb is not None:
+            target_opt = "474" if "474" in source_sb.options else source_sb.options[1]
+            source_sb.select(target_opt).run()
         else:
             at.run()
-        self._verify_all_sections_rendered(at, "Rerun 1 (Filter 474)")
+        self._verify_all_sections_rendered(at, "Rerun 1 (Filter Single Source)")
 
         # Rerun 2: Adjust window length slider
         if len(at.slider) >= 2:
@@ -95,8 +101,13 @@ class TestStreamlitRerunDelegation(unittest.TestCase):
         self._verify_all_sections_rendered(at, "Rerun 2 (Slider Adjustment)")
 
         # Rerun 3: Reset filter to 'ALL'
-        if len(at.selectbox) >= 2:
-            at.selectbox[1].select("ALL").run()
+        reset_sb = None
+        for sb in at.selectbox:
+            if "ALL" in sb.options:
+                reset_sb = sb
+                break
+        if reset_sb is not None:
+            reset_sb.select("ALL").run()
         else:
             at.run()
         self._verify_all_sections_rendered(at, "Rerun 3 (Reset ALL)")

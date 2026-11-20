@@ -79,7 +79,32 @@ from bridge.synthesizer import (
 SCHEMA_PATH = ROOT / "schemas" / "drone_v0.yaml"
 GOLDEN_DIR = ROOT / "fixtures" / "golden"
 BRIDGE_DIR = ROOT / "bridge"
+IRL_DIR = ROOT / "test_data" / "irl"
+UNSEEN_DIR = ROOT / "test_data" / "unseen"
+STORAGE_PROPERTIES = ROOT / "fss-core" / "storage.properties"
 MAX_WINDOW_NS = 3600 * 10**9  # 1 hour max retrieval window contract
+
+
+def iter_any_envelopes(data: bytes) -> list[EventRecord]:
+    """Decode envelopes from either Contract v0 wire (<HBBIQII) or envelope.cfg (>IQII)."""
+    if len(data) >= 2 and data[:2] == b"\x53\x46":
+        try:
+            return list(iter_envelopes(data))
+        except Exception:
+            pass
+    # Try Big-Endian envelope.cfg: >IQII (20-byte header)
+    HEADER = struct.Struct(">IQII")
+    records = []
+    offset = 0
+    while offset + 20 <= len(data):
+        agent_id, ts, plen, etype = HEADER.unpack_from(data, offset)
+        if plen < 0 or offset + 20 + plen > len(data):
+            break
+        payload = data[offset + 20 : offset + 20 + plen]
+        records.append(EventRecord(agent_id, ts, etype, payload))
+        offset += 20 + plen
+    return records
+
 
 T = TypeVar("T")
 
@@ -260,6 +285,18 @@ def get_java_retriever_for_store(store_path: str) -> ThreadSafeWrapper[JavaRetri
     scope="global",
     validate=_validate_resource_wrapper,
     on_release=_release_resource_wrapper,
+    show_spinner="Connecting to Java Storage IPC Engine...",
+)
+def get_java_storage_ipc_retriever(storage_properties: str) -> ThreadSafeWrapper[JavaRetriever]:
+    """Connect JavaRetriever to Java Storage & Retrieval via IPC engine."""
+    retriever = JavaRetriever(mode="storage_ipc", storage_properties=storage_properties)
+    return ThreadSafeWrapper(retriever)
+
+
+@st.cache_resource(
+    scope="global",
+    validate=_validate_resource_wrapper,
+    on_release=_release_resource_wrapper,
 )
 def get_local_llm_engine() -> ThreadSafeWrapper[LocalLLMEngine]:
     return ThreadSafeWrapper(LocalLLMEngine())
@@ -327,9 +364,15 @@ def fmt_ns(ns: int | None) -> str:
     """Format nanoseconds as UTC datetime string with full 9-digit nanosecond precision."""
     if ns is None:
         return "N/A"
-    dt = datetime.fromtimestamp(ns // 10**9, tz=timezone.utc)
-    nanos = ns % 10**9
-    return f"{dt:%Y-%m-%d %H:%M:%S}.{nanos:09d}"
+    try:
+        if ns < 10**14:  # Milliseconds
+            dt = datetime.fromtimestamp(ns / 1000.0, tz=timezone.utc)
+            return f"{dt:%Y-%m-%d %H:%M:%S}.{(ns % 1000):03d}000000"
+        dt = datetime.fromtimestamp(ns // 10**9, tz=timezone.utc)
+        nanos = ns % 10**9
+        return f"{dt:%Y-%m-%d %H:%M:%S}.{nanos:09d}"
+    except Exception:
+        return str(ns)
 
 
 def make_lossless_json_safe(obj: Any) -> Any:
@@ -603,20 +646,68 @@ def main() -> None:
     with st.sidebar:
         st.header("📦 Storage & Data Source")
 
-        # Discover fixtures and existing stores
+        # Discover fixtures, IRL logs, unseen scenarios, and existing stores
         fixture_files = sorted(p.name for p in GOLDEN_DIR.glob("*.bin")) if GOLDEN_DIR.is_dir() else []
+        irl_files = sorted(p.name for p in IRL_DIR.glob("*.fss.bin")) if IRL_DIR.is_dir() else []
+        unseen_files = sorted(p.name for p in UNSEEN_DIR.glob("*.bin")) if UNSEEN_DIR.is_dir() else []
         dat_files = sorted(p.name for p in BRIDGE_DIR.glob("*.dat")) if BRIDGE_DIR.is_dir() else []
 
         source_mode = st.radio(
             "Source Mode",
-            ["Preset Binary Fixtures", "Existing Java BlockStore (.dat)", "Upload Custom Binary (.bin)"],
+            [
+                "Java Telemetry Storage (IPC Engine)",
+                "Preset Binary Fixtures",
+                "Existing Java BlockStore (.dat)",
+                "Upload Custom Binary (.bin)",
+            ],
             index=0,
         )
 
         chosen_fixtures: list[Path] = []
         chosen_store: Path | None = None
+        storage_ipc_selected_path: Path | None = None
 
-        if source_mode == "Preset Binary Fixtures":
+        if source_mode == "Java Telemetry Storage (IPC Engine)":
+            cat = st.selectbox(
+                "Corpus Category",
+                [
+                    "Unseen Test Scenarios (test_data/unseen)",
+                    "Real-World ArduPilot Logs (test_data/irl)",
+                    "Golden Fixtures (fixtures/golden)",
+                ],
+                index=0,
+            )
+            if cat == "Unseen Test Scenarios (test_data/unseen)":
+                target_dir = UNSEEN_DIR
+                cat_files = unseen_files
+            elif cat == "Real-World ArduPilot Logs (test_data/irl)":
+                target_dir = IRL_DIR
+                cat_files = irl_files
+            else:
+                target_dir = GOLDEN_DIR
+                cat_files = fixture_files
+
+            if cat_files:
+                sel_file = st.selectbox("Select Binary Log", cat_files, index=0)
+                storage_ipc_selected_path = target_dir / sel_file
+                chosen_fixtures = [storage_ipc_selected_path]
+                st.caption(f"📄 `{storage_ipc_selected_path.relative_to(ROOT)}`")
+
+                curr_ingested = st.session_state.get("ipc_ingested_file")
+                needs_ingest = curr_ingested != str(storage_ipc_selected_path)
+                if needs_ingest:
+                    st.warning("⚠️ Storage not yet synced with this file.")
+                if st.button("📥 Ingest into Java IPC Storage", use_container_width=True) or needs_ingest:
+                    with st.spinner(f"Ingesting {sel_file} into Storage..."):
+                        temp_ret = JavaRetriever(mode="storage_ipc", storage_properties=STORAGE_PROPERTIES)
+                        temp_ret.ingest_clean(storage_ipc_selected_path)
+                        st.session_state["ipc_ingested_file"] = str(storage_ipc_selected_path)
+                        st.cache_resource.clear()
+                        st.cache_data.clear()
+                        st.success(f"Ingested {sel_file} successfully!")
+                        st.rerun()
+
+        elif source_mode == "Preset Binary Fixtures":
             default_selection = ["scenario_298_474.bin"] if "scenario_298_474.bin" in fixture_files else fixture_files[:1]
             selected_names = st.multiselect("Select Golden Fixtures", fixture_files, default=default_selection)
             chosen_fixtures = [GOLDEN_DIR / name for name in selected_names]
@@ -647,14 +738,21 @@ def main() -> None:
     sample_envelopes = []
 
     try:
-        if chosen_store is not None and chosen_store.exists():
+        if source_mode == "Java Telemetry Storage (IPC Engine)":
+            retriever_wrapper = get_java_storage_ipc_retriever(str(STORAGE_PROPERTIES))
+            if chosen_fixtures and chosen_fixtures[0].exists():
+                try:
+                    sample_envelopes = iter_any_envelopes(chosen_fixtures[0].read_bytes())
+                except Exception:
+                    pass
+        elif chosen_store is not None and chosen_store.exists():
             retriever_wrapper = get_java_retriever_for_store(str(chosen_store))
         elif chosen_fixtures:
             fixture_strs = tuple(str(p.resolve()) for p in chosen_fixtures)
             retriever_wrapper = get_java_retriever(fixture_strs)
             for p in chosen_fixtures:
                 try:
-                    sample_envelopes.extend(iter_envelopes(p.read_bytes()))
+                    sample_envelopes.extend(iter_any_envelopes(p.read_bytes()))
                 except Exception:
                     pass
         else:
@@ -674,7 +772,9 @@ def main() -> None:
         t_min = 1791454020000000000
         t_max = 1791454025000000000
 
-    span_s = max(1, -(-(t_max - t_min + 1) // 10**9))
+    is_ms = t_max < 10**14
+    unit_scale = 1000 if is_ms else 10**9
+    span_s = max(1, -(-(t_max - t_min + 1) // unit_scale))
 
     # Sidebar: Retrieval Bounds
     with st.sidebar:
@@ -689,8 +789,8 @@ def main() -> None:
         source_selection = st.selectbox("Source Filter", source_options, index=0)
         max_events = st.number_input("Max Events", min_value=1, max_value=10000, value=100, step=10)
 
-        t_start_ns = t_min + offset * 10**9
-        t_end_ns = min(t_start_ns + duration * 10**9, t_start_ns + MAX_WINDOW_NS)
+        t_start_ns = t_min + offset * unit_scale
+        t_end_ns = min(t_start_ns + duration * unit_scale, t_start_ns + (3600 * unit_scale if is_ms else MAX_WINDOW_NS))
 
         st.divider()
         st.header("🤖 Qwen Model Resolution")
@@ -724,8 +824,9 @@ def main() -> None:
     with st.spinner("Invoking Java BlockStore bounded retrieval..."):
         try:
             with retriever_wrapper as retriever:
+                store_key = str(retriever.storage_properties if retriever.mode == "storage_ipc" else retriever.store_path)
                 retrieval_res: RetrievalResult = cached_execute_retrieval(
-                    retriever.store_path,
+                    store_key,
                     "ALL" if source_arg is ALL else str(source_arg),
                     t_start_ns,
                     t_end_ns,

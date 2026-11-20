@@ -41,6 +41,8 @@ htmlcov/
 *.pem
 *.sock
 /tmp/fss_*
+test_data/**/*.bin
+test_data/**/*.fss.bin
 
 # Build artifacts (recompiled cleanly inside image)
 bridge/classes/*.class

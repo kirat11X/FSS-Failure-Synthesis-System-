@@ -308,6 +308,34 @@ class JavaRetriever:
             resolved_fp = fp if fp.is_absolute() else (self.root / fp).resolve()
             resolved_fixtures.append(str(resolved_fp))
 
+        # If in storage_ipc mode, ingest directly using Ingestion.FileIngestor
+        if self.mode == "storage_ipc":
+            if self.storage_properties is None or not self.storage_properties.exists():
+                raise FileNotFoundError(f"Storage properties file not found: {self.storage_properties}")
+            for rf in resolved_fixtures:
+                cmd = [
+                    self.java_bin,
+                    "-Dfile.encoding=UTF-8",
+                    "-cp",
+                    self.classpath,
+                    "Ingestion.FileIngestor",
+                    str(self.storage_properties),
+                    rf,
+                    "--append",
+                ]
+                env = dict(os.environ)
+                env["FSS_TRACE_ID"] = tid
+                code, stdout, stderr = run_subprocess_safe(
+                    cmd,
+                    cwd=self.root,
+                    env=env,
+                    timeout=self.timeout,
+                )
+                if code != 0:
+                    err_msg = stderr.decode("utf-8", errors="replace")
+                    raise RuntimeError(f"FileIngestor failed for {rf} (code {code}):\n{err_msg}")
+            return
+
         # Check if persistent worker is active
         use_worker = (self.mode == "worker") or (self.mode == "auto" and self.is_worker_alive(self.socket_path))
         if use_worker:
@@ -360,6 +388,45 @@ class JavaRetriever:
             finally:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
+    def ingest_clean(self, *fixture_paths: str | Path, trace_id: str | None = None) -> None:
+        """Clean storage directory and ingest wire envelope fixtures."""
+        if self.mode == "storage_ipc":
+            if self.storage_properties is None or not self.storage_properties.exists():
+                raise FileNotFoundError(f"Storage properties file not found: {self.storage_properties}")
+            tid = bind_trace_id(trace_id)
+            first = True
+            for p in fixture_paths:
+                fp = Path(p)
+                resolved_fp = fp if fp.is_absolute() else (self.root / fp).resolve()
+                cmd = [
+                    self.java_bin,
+                    "-Dfile.encoding=UTF-8",
+                    "-cp",
+                    self.classpath,
+                    "Ingestion.FileIngestor",
+                    str(self.storage_properties),
+                    str(resolved_fp),
+                ]
+                if not first:
+                    cmd.append("--append")
+                first = False
+
+                env = dict(os.environ)
+                env["FSS_TRACE_ID"] = tid
+                code, stdout, stderr = run_subprocess_safe(
+                    cmd,
+                    cwd=self.root,
+                    env=env,
+                    timeout=self.timeout,
+                )
+                if code != 0:
+                    err_msg = stderr.decode("utf-8", errors="replace")
+                    raise RuntimeError(f"FileIngestor clean ingest failed for {resolved_fp} (code {code}):\n{err_msg}")
+            return
+
+        # Fallback to standard ingest
+        self.ingest(*fixture_paths, trace_id=trace_id)
+
     def _retrieve_via_storage_ipc(
         self,
         source: int | _AllSources,
@@ -375,15 +442,18 @@ class JavaRetriever:
             raise FileNotFoundError(f"Storage properties file not found: {self.storage_properties}")
 
         tid = bind_trace_id(trace_id)
-        # StorageConfig timestamps are in milliseconds; convert if provided in nanoseconds
-        start_ms = t_start_ns // 1_000_000 if t_start_ns > 10_000_000_000_000 else t_start_ns
-        end_ms = t_end_ns // 1_000_000 if t_end_ns > 10_000_000_000_000 else t_end_ns
+        start_val = int(t_start_ns)
+        end_val = int(t_end_ns)
+        if start_val >= (1 << 63):
+            start_val -= (1 << 64)
+        if end_val >= (1 << 63):
+            end_val -= (1 << 64)
 
         source_val: str | int = "all" if source is ALL else (int(source) if isinstance(source, int) else str(source))
         req = {
             "source": source_val,
-            "start_time": int(start_ms),
-            "end_time": int(end_ms),
+            "start_time": start_val,
+            "end_time": end_val,
             "event_type": event_type,
         }
 
@@ -420,6 +490,12 @@ class JavaRetriever:
                 raise RuntimeError(f"RetrievalIpcServer closed stream without responding. Stderr: {stderr_str}")
 
             resp_len = struct.unpack(">I", len_buf)[0]
+            max_frame_bytes = 16 * 1024 * 1024  # Enforce 16 MB max frame length guard
+            if resp_len <= 0 or resp_len > max_frame_bytes:
+                raise ValueError(
+                    f"Invalid IPC frame length from RetrievalIpcServer: {resp_len} bytes "
+                    f"(must be between 1 and {max_frame_bytes} bytes)"
+                )
             resp_buf = proc.stdout.read(resp_len)
             resp_obj = json.loads(resp_buf.decode("utf-8"))
 
@@ -450,7 +526,7 @@ class JavaRetriever:
                     src_id = 0
 
                 raw_ts = int(r.get("timestamp", 0))
-                ts_ns = raw_ts * 1_000_000 if raw_ts < 10_000_000_000_000 else raw_ts
+                ts_ns = raw_ts + (1 << 64) if raw_ts < 0 else raw_ts
 
                 payload_b64 = r.get("payload", "")
                 ev_type = int(r.get("eventType", 0))

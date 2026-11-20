@@ -1,0 +1,46 @@
+{
+  "unseen_01_esc_desync_compass_trap.bin": {
+    "filename": "unseen_01_esc_desync_compass_trap.bin",
+    "description": "ESC desync causation trap with secondary compass variance spike",
+    "total_events": 213,
+    "file_size_bytes": 6810
+  },
+  "unseen_02_blackout_data_gap.bin": {
+    "filename": "unseen_02_blackout_data_gap.bin",
+    "description": "42-second unrecorded telemetry blackout across crash event",
+    "total_events": 123,
+    "file_size_bytes": 4162,
+    "gap_seconds": 42.0
+  },
+  "unseen_03_uint64_burst_multi_block.bin": {
+    "filename": "unseen_03_uint64_burst_multi_block.bin",
+    "description": "Large multi-block burst (>192KB) across >3 64KB blocks with uint64 >= 2^63 timestamps",
+    "total_events": 6000,
+    "file_size_bytes": 216000,
+    "blocks_crossed": 4
+  },
+  "unseen_04_multi_agent_entity_swap.bin": {
+    "filename": "unseen_04_multi_agent_entity_swap.bin",
+    "description": "3 agents with concurrent isolated failure modes (GPS loss, undervoltage, lidar obstacle)",
+    "total_events": 450,
+    "file_size_bytes": 13150,
+    "agents": [
+      101,
+      102,
+      103
+    ]
+  },
+  "unseen_05_silent_baro_ekf_drift.bin": {
+    "filename": "unseen_05_silent_baro_ekf_drift.bin",
+    "description": "400-event silent baro/EKF drift without explicit error events",
+    "total_events": 800,
+    "file_size_bytes": 27200
+  },
+  "unseen_06_corrupt_tail_out_of_order.bin": {
+    "filename": "unseen_06_corrupt_tail_out_of_order.bin",
+    "description": "Non-monotonic out-of-order timestamps followed by truncated tail frame at EOF",
+    "total_events": 150,
+    "file_size_bytes": 4807,
+    "truncated_tail_bytes": 7
+  }
+}

@@ -9,11 +9,32 @@ from fss_py.model import ALL, EventRecord
 
 
 @pytest.fixture(scope="module")
-def storage_env():
-    """Ensure Storage classes are compiled and test data exists."""
+def storage_env(tmp_path_factory):
+    """Ensure Storage classes are compiled and test data exists in an isolated directory."""
     root = Path(__file__).resolve().parent.parent
-    props_path = root / "fss-core" / "storage.properties"
-    assert props_path.exists(), "storage.properties must exist"
+    test_dir = tmp_path_factory.mktemp("storage_test")
+    props_path = test_dir / "storage.properties"
+
+    content = f"""root={test_dir / "data"}
+envelopeConfig={root / "fss-core" / "envelope.cfg"}
+blockSize=65536
+maxMessageSize=4096
+bufferCapacityBytes=1048576
+segmentDurationMillis=60000
+byteOrder=BIG_ENDIAN
+"""
+    props_path.write_text(content)
+
+    retriever = JavaRetriever()
+    cmd = [
+        retriever.java_bin,
+        "-cp",
+        retriever.classpath,
+        "DirectIngestionRetrievalTest",
+        str(props_path),
+    ]
+    import subprocess
+    subprocess.run(cmd, cwd=root, check=True)
     return props_path
 
 

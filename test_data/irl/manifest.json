@@ -1,0 +1,77 @@
+{
+  "dataflash_sample_1.bin": {
+    "input_file": "test_data/irl/dataflash_sample_1.bin",
+    "output_file": "test_data/irl/dataflash_sample_1.fss.bin",
+    "agent_id": 1,
+    "total_envelopes": 5000,
+    "type_counts": {
+      "EV": 4,
+      "BAT": 1666,
+      "ATT": 1665,
+      "VIBE": 1665
+    },
+    "file_size_bytes": 163298
+  },
+  "dataflash_sample_2.bin": {
+    "input_file": "test_data/irl/dataflash_sample_2.bin",
+    "output_file": "test_data/irl/dataflash_sample_2.fss.bin",
+    "agent_id": 1,
+    "total_envelopes": 1567,
+    "type_counts": {
+      "EV": 5,
+      "BAT": 521,
+      "ATT": 521,
+      "VIBE": 520
+    },
+    "file_size_bytes": 51144
+  },
+  "dataflash_sample_3.bin": {
+    "input_file": "test_data/irl/dataflash_sample_3.bin",
+    "output_file": "test_data/irl/dataflash_sample_3.fss.bin",
+    "agent_id": 1,
+    "total_envelopes": 3103,
+    "type_counts": {
+      "EV": 16,
+      "BAT": 1030,
+      "ATT": 1029,
+      "VIBE": 1028
+    },
+    "file_size_bytes": 101224
+  },
+  "log171.bin": {
+    "input_file": "test_data/irl/log171.bin",
+    "output_file": "test_data/irl/log171.fss.bin",
+    "agent_id": 1,
+    "total_envelopes": 5000,
+    "type_counts": {
+      "CURR": 1427,
+      "ATT": 1426,
+      "EKF1": 1426,
+      "GPS": 716,
+      "EV": 5
+    },
+    "file_size_bytes": 162824
+  },
+  "sample_clean.bin": {
+    "input_file": "test_data/irl/sample_clean.bin",
+    "output_file": "test_data/irl/sample_clean.fss.bin",
+    "agent_id": 1,
+    "total_envelopes": 1800,
+    "type_counts": {
+      "BAT": 900,
+      "GPS": 900
+    },
+    "file_size_bytes": 61200
+  },
+  "sample_flawed.bin": {
+    "input_file": "test_data/irl/sample_flawed.bin",
+    "output_file": "test_data/irl/sample_flawed.fss.bin",
+    "agent_id": 1,
+    "total_envelopes": 1800,
+    "type_counts": {
+      "BAT": 900,
+      "GPS": 900
+    },
+    "file_size_bytes": 61200
+  }
+}

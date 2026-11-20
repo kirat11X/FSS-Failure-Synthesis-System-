@@ -30,6 +30,9 @@ fss-core/lib/
 *.dat
 *.lock
 fss-core/test-data/
+test_data/**/*.bin
+test_data/**/*.fss.bin
+!test_data/**/manifest.json
 
 # Downloaded research PDFs (keep research_papers/README.md only)
 research_papers/*/

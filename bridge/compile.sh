@@ -42,12 +42,13 @@ if [ -n "$JACKSON_CP" ]; then
   java bridge/CompileHelper.java -cp "fss-core/target/classes:$JACKSON_CP" -d fss-core/target/classes \
       fss-core/src/main/java/Ingestion/IngestionResult.java \
       fss-core/src/main/java/Ingestion/TelemetryIngestor.java \
-      fss-core/src/main/Retrieval/RetrievalRecord.java \
-      fss-core/src/main/Retrieval/RetrievalRequest.java \
-      fss-core/src/main/Retrieval/RetrievalResponse.java \
-      fss-core/src/main/Retrieval/RetrievalService.java \
-      fss-core/src/main/Retrieval/RetrievalIpcServer.java \
-      fss-core/src/main/Retrieval/RetrievalMain.java \
+      fss-core/src/main/java/Ingestion/FileIngestor.java \
+      fss-core/src/main/java/Retrieval/RetrievalRecord.java \
+      fss-core/src/main/java/Retrieval/RetrievalRequest.java \
+      fss-core/src/main/java/Retrieval/RetrievalResponse.java \
+      fss-core/src/main/java/Retrieval/RetrievalService.java \
+      fss-core/src/main/java/Retrieval/RetrievalIpcServer.java \
+      fss-core/src/main/java/Retrieval/RetrievalMain.java \
       fss-core/src/main/DirectIngestionRetrievalTest.java
 fi
 

@@ -23,7 +23,7 @@ def rejects(document, match):
 
 
 def test_repo_schema_loads(registry):
-    assert len(registry) == 4
+    assert len(registry) >= 4
     assert registry.type_id("LIDAR_STATUS") == 0x10
     assert 0x31 not in registry
     lidar = registry.get(0x10)
