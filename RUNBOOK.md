@@ -14,12 +14,51 @@ To execute the end-to-end linked system (ingesting/opening the durable Java `Blo
 
 ### Web Dashboard & Live Service Launch
 
-To launch the full interactive web application (connecting the Streamlit UI to the Java `BlockStore` engine and Python Qwen RAG pipeline):
+To launch the full interactive web application (connecting the Streamlit UI to the Java `BlockStore` engine and Python Qwen RAG pipeline), use either launcher:
 
 ```bash
-./start_all.sh
+./start.sh      # Single-command launcher (accepts --port, --address, -h)
+# or
+./start_all.sh  # Underlying hardened orchestrator
 ```
-*Access the live dashboard in your browser:* `http://127.0.0.1:8501` (or specify `PORT=8502 ./start_all.sh`).
+*Access the live dashboard in your browser:* `http://127.0.0.1:8501` (or specify `./start.sh --port 8502`).
+
+### Docker Deployment
+
+To build and run the multi-runtime container (OpenJDK 21 + Python 3.11 + Streamlit dashboard):
+
+```bash
+# Build the container image
+docker build -t fss:latest .
+
+# Run the container exposing port 8501
+docker run -d --name fss-app -p 8501:8501 fss:latest
+
+# Execute the 10-suite verification tests inside the container
+docker run --rm fss:latest pytest tests/
+
+# Execute an end-to-end pipeline run inside the container
+docker run --rm fss:latest ./run_pipeline.sh --scenario scenario_298_474
+```
+
+### Environment Setup & Editable Package Installation
+
+FSS eliminates fragile `sitecustomize.py` interpreter hooks in favor of canonical editable package installation via `pyproject.toml`. This prevents silent shadowing by distribution packages and guarantees importability across containerized and multi-user environments.
+
+```bash
+# 1. Activate Python 3.11+ virtual environment
+source .venv/bin/activate
+
+# 2. Install dependencies and register bridge and fss_py in editable mode
+pip install --upgrade pip
+pip install -r requirements.txt -r requirements-app.txt
+pip install -e .
+
+# 3. Verify editable installation
+python -c "import bridge; import fss_py; print('FSS editable package registered OK')"
+```
+
+Streamlit is launched canonically via `exec "$VENV_PYTHON" -m streamlit run app.py` with `PYTHONUNBUFFERED=1` and `XLA_PYTHON_CLIENT_PREALLOCATE=false`. This ensures the active virtual-environment interpreter is executed directly without JAX VRAM preallocation.
 
 ### What Happens Automatically
 When `./run_pipeline.sh` is executed without arguments:
@@ -255,27 +294,144 @@ The end-to-end execution path strictly isolates storage concerns from intelligen
 
 ---
 
-## 6. Verification & Test Execution
+## 6. Local Verification Suite (10-Suite pytest + Hypothesis Harness)
 
-### 1. Integration Tests
-To run the automated integration test suite covering Java compilation, BlockStore ingestion, bounded retrieval, Python retriever protocol conformance, citation validation, hallucination rejection, and end-to-end ProcessBuilder execution:
+FSS provides a comprehensive, deterministic 10-suite verification harness combining unit, property-based (Hypothesis), concurrency, and contract testing. All suites run offline without requiring external network access or dedicated GPU hardware.
+
+### 10-Suite Verification Matrix
+
+| # | Test Suite File | Target Layer | Exact Method / Invariant Under Test | Pass Criterion |
+|---|---|---|---|---|
+| 1 | `tests/test_uint64_roundtrip.py` | Java -> JSON -> Python -> UI | Hypothesis `@given(st.integers(0, (1<<64)-1))` and boundary seeds (`2^53-1`, `2^53`, `2^63-1`, `2^63`, `2^64-1`, `1795139460123456789` vs `+100 ns`) persisted in BlockStore and retrieved. | Exact bitwise equality in Python `int`, monotonic `findMinTs()`, distinct display strings for 100 ns pairs. |
+| 2 | `tests/test_pipe_deadlock_64kb.py` | `bridge/java_retriever.py` | Trigger concurrent retrieval returning >256KB NDJSON on stdout while Java writes >128KB logs to stderr. | Completes cleanly under 5.0s with zero hang and zero JSON corruption. |
+| 3 | `tests/test_timeout_orphan_cleanup.py` | `bridge/java_retriever.py` | Invoke simulated hung JVM with `timeout=1.0`; inspect OS process tree for surviving/defunct PIDs. | `TimeoutError` handled cleanly; exactly 0 live and 0 `<defunct>` zombie child JVM processes remain. |
+| 4 | `tests/test_stdout_pollution.py` | Wire Protocol | Launch `JavaRetriever` with `JAVA_TOOL_OPTIONS="-Dtest.flag=1"` and `_JAVA_OPTIONS` injected into child env. | Pydantic v2 `TypeAdapter` parses framed response with zero JSON decode errors. |
+| 5 | `tests/test_zero_event_contract.py` | End-to-End Pipeline | Query a time range with 0 persisted events across Java BlockStore -> Python -> UI. | Returns typed `status="EMPTY"`, activates Data Gaps Quarantine, short-circuits LLM into `INSUFFICIENT_EVIDENCE`. |
+| 6 | `tests/test_blockstore_concurrency.py` | Java BlockStore + Locking | Spawn 8 concurrent Python threads/processes issuing overlapping BlockStore writes and bounded reads. | 0 `OverlappingFileLockException`, 0 torn 64KB blocks (file size % 65536 == 0), 100% read-back integrity. |
+| 7 | `tests/test_streamlit_rerun_delegation.py` | `app.py` & `streamlit_app.py` | Simulate initial load plus 3 consecutive widget reruns against `app.py`. | All 8 UI sections render across every rerun; zero blank-page regression; zero `torch.classes` exceptions. |
+| 8 | `tests/test_context_budget_guard.py` | Local LLM Client | Feed synthetic 500-event timeline against simulated `num_ctx=4096` and `num_ctx=16384`. | Pre-flight guard triggers deterministic compaction/warning before dispatch; never sends silent overflow. |
+| 9 | `tests/test_qwen3_think_budget.py` | Local LLM Client | Simulate an unclosed `<think>` stream exceeding `thinking_budget` tokens without closing token 151668. | Guard injects `</think>` close prompt, emits `reasoning_truncated=True`, produces schema-valid JSON. |
+| 10 | `tests/test_adversarial_citations.py` | Validation Badges | Fuzz outputs containing `[ev-fake]`, `[drone-298]`, entity-swapped valid IDs, and correlation-to-causation overclaims. | 100% rejection of fake/swapped IDs; `FORCE_OVERCLAIM` badge triggered on uncalibrated causal claims. |
+
+### Running All 10 Verification Suites
+
+To run all 10 verification test suites in a single command:
 
 ```bash
-python -m unittest bridge/test_bridge.py
+pytest \
+  tests/test_uint64_roundtrip.py \
+  tests/test_pipe_deadlock_64kb.py \
+  tests/test_timeout_orphan_cleanup.py \
+  tests/test_stdout_pollution.py \
+  tests/test_zero_event_contract.py \
+  tests/test_blockstore_concurrency.py \
+  tests/test_streamlit_rerun_delegation.py \
+  tests/test_context_budget_guard.py \
+  tests/test_qwen3_think_budget.py \
+  tests/test_adversarial_citations.py \
+  -v
 ```
-*Expected: 6 tests passing in under 2 seconds.*
 
-### 2. Manual Recompilation of Bridge
-If modifications are made to `bridge/JavaStoreBridge.java`:
-
+To run the complete repository test suite:
 ```bash
-bash bridge/compile.sh
+pytest tests/ -v
 ```
 
-### 3. Launching the Interactive Web UI
-To launch the Streamlit frontend with interactive scenario selection and timeline visualization:
+---
 
+## 7. Persistent Worker IPC Mode (JEP-380 AF_UNIX)
+
+For interactive serving and high-frequency queries across concurrent Streamlit sessions, FSS supports a persistent Java daemon (`JavaBridgeWorker`) running over standard Linux Unix domain sockets (JEP-380 AF_UNIX). This eliminates repeated ~60–900 ms JVM cold-start latency and keeps JIT compilations and BlockStore file descriptors warm.
+
+### Socket Configuration & Mechanics
+
+- **Socket Path**: `/tmp/fss_bridge.sock` (path length < 100 bytes to satisfy Linux `sockaddr_un` limits).
+- **Wire Framing**: Single-line UTF-8 Newline-Delimited JSON (NDJSON) with strict separation of stdout (protocol channel) and stderr (diagnostics).
+- **Process Cleanup**: `start_all.sh` registers a signal trap (`trap cleanup EXIT INT TERM`) that sends SIGTERM, waits 5 seconds, issues SIGKILL to child workers, and deletes stale socket files (`rm -f /tmp/fss_bridge.sock`).
+
+### Starting the Persistent Worker
+
+To launch the persistent Java worker independently:
 ```bash
-./run.sh
+java -cp "fss-core/target/classes:bridge/classes" bridge.JavaBridgeWorker --socket /tmp/fss_bridge.sock
 ```
-*Accessible at `http://127.0.0.1:8501`.*
+
+To control the worker programmatically from Python:
+```python
+from bridge.java_retriever import JavaRetriever
+from fss_py.model import ALL
+
+# 1. Start worker daemon
+proc = JavaRetriever.start_worker(socket_path="/tmp/fss_bridge.sock")
+
+# 2. Query retriever via AF_UNIX socket
+retriever = JavaRetriever("bridge/store_scenario_298_474.dat", mode="worker", socket_path="/tmp/fss_bridge.sock")
+envelope = retriever.retrieve_envelope(ALL, 1791454021200000000, 1791454024300000000, max_events=100)
+
+# 3. Stop worker daemon cleanly
+JavaRetriever.stop_worker(socket_path="/tmp/fss_bridge.sock")
+```
+
+---
+
+## 8. Local LLM Configuration & Context Budget Guard (`num_ctx >= 16384`)
+
+FSS synthesizes multi-agent root causes through an 8-part structured diagnostic prompt requiring significant token headroom (system instructions, domain runbooks, timeline telemetry, data gaps, and Qwen3 reasoning traces).
+
+### Sizing the Ollama Context Window
+
+Ollama defaults to a 4,096-token context window on systems with less than 24 GiB VRAM. Under context overflow, Ollama silently drops older prompt content with HTTP 200 without warning.
+
+To prevent silent truncation, configure `num_ctx >= 16384`:
+
+1. **Environment Configuration**:
+   ```bash
+   # Set active server context length (do NOT use OLLAMA_NUM_CTX; it is ignored by Ollama)
+   export OLLAMA_CONTEXT_LENGTH=16384
+   ```
+
+2. **Systemd Linux Service** (if running as a daemon):
+   ```bash
+   sudo systemctl edit ollama
+   # Add in the override section:
+   # [Service]
+   # Environment="OLLAMA_CONTEXT_LENGTH=16384"
+   sudo systemctl restart ollama
+   ```
+
+3. **Modelfile Configuration**:
+   ```dockerfile
+   FROM qwen2.5:3b
+   PARAMETER num_ctx 16384
+   ```
+
+4. **Verify Active Context**:
+   ```bash
+   ollama ps
+   # Check the CONTEXT column to confirm >= 16384 tokens are active
+   ```
+
+### Pre-Flight Token Budget Guard
+
+Before dispatching prompts to local LLMs, FSS runs `preflight_budget_guard(evidence, query, num_ctx)`:
+- Computes conservative token estimates (1 token per 3.8 characters).
+- Enforces minimum reserved output headroom (1,200 tokens non-thinking; 3,200 tokens thinking).
+- Deterministically compacts nominal timeline events if prompt size threatens to overflow `num_ctx`, emitting an explicit warning in the UI rather than permitting silent truncation.
+
+### Qwen3 Sampling & Think-Budget Guard
+
+When using Qwen3 thinking models:
+- **Never use greedy decoding (`temperature=0.0`) in thinking mode**: causes infinite repetition loops. Use recommended sampling defaults: `temperature=0.6, top_p=0.95, top_k=20, min_p=0, presence_penalty=1.5`.
+- **Think-Budget Guard**: If decoding reaches `thinking_budget` (e.g. 1,024 tokens) without emitting closing token 151668 (`</think>`), the guard injects `</think>`, sets `reasoning_truncated=True`, and enforces JSON grammar masks for the final answer.
+
+---
+
+## 9. Dual-Runtime GitHub Actions CI
+
+Continuous integration is automated via `.github/workflows/ci.yml`. On every push and pull request to `main` and `integration-bridge`, the workflow executes:
+
+1. **Dual Runtimes**: Pairs Eclipse Temurin JDK 21 (`actions/setup-java@v4`) and Python 3.11 / 3.12 (`actions/setup-python@v5`).
+2. **Deterministic Build**: Compiles `fss-core` via Maven and bridge classes via `bridge/compile.sh`.
+3. **Editable Python Environment**: Installs requirements and registers `pip install -e .`.
+4. **10-Suite Verification**: Executes all 10 pytest and Hypothesis suites without requiring a GPU.
+5. **Headless Streamlit Health Check**: Boots `app.py` in headless mode and polls `/_stcore/health` to guarantee zero blank-page regressions.

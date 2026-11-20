@@ -1,0 +1,58 @@
+# Git
+.git
+.gitignore
+
+# Python bytecode & environments
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.venv/
+venv/
+
+# Testing & caching
+.pytest_cache/
+.hypothesis/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Temporary data, locks, and sockets
+*.dat
+*.lock
+*.pem
+*.sock
+/tmp/fss_*
+
+# Build artifacts (recompiled cleanly inside image)
+bridge/classes/*.class
+bridge/classes/fss/
+bridge/classes/bridge/
+
+# Local documents and IDE
+research_fss_neon.odt
+Untitled-1.md
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store

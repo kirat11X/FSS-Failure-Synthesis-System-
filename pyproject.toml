@@ -1,12 +1,32 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
 [project]
-name = "fss-py"
+name = "fss"
 version = "0.1.0"
-description = "Failure Synthesis System - deterministic decoding and evidence layer (P1)"
+description = "Failure Synthesis System - deterministic decoding and evidence layer"
+readme = "README.md"
 requires-python = ">=3.11"
-dependencies = ["PyYAML>=6.0"]
+dependencies = [
+    "pydantic>=2.0",
+    "streamlit>=1.40",
+    "PyYAML>=6.0",
+    "bm25s>=0.3.0",
+    "numpy>=1.24",
+    "requests>=2.28",
+]
 
 [project.optional-dependencies]
-test = ["pytest>=7"]
+test = [
+    "pytest>=7",
+    "hypothesis",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["fss_py*", "bridge*"]
+namespaces = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

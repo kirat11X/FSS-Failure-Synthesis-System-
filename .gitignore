@@ -26,6 +26,7 @@ fss-core/target/
 
 # Runtime data
 *.dat
+*.lock
 
 # Downloaded research PDFs (keep research_papers/README.md only)
 research_papers/*/
@@ -37,3 +38,6 @@ research_papers/*/
 Thumbs.db
 *.swp
 .claude/
+Untitled-1.md
+research_fss_neon.odt
+

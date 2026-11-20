@@ -26,24 +26,7 @@ os.environ["no_proxy"] = "127.0.0.1,localhost"
 sys.modules.setdefault("google._upb._message", None)
 sys.modules.setdefault("google.protobuf.pyext._message", None)
 
-uv_archives = Path("/home/kirat/.cache/uv/archive-v0")
-if uv_archives.is_dir():
-    for d in sorted(uv_archives.iterdir(), reverse=True):
-        if d.is_dir() and str(d) not in sys.path:
-            has_incompatible = any(
-                f.name.startswith("numpy") or f.name.startswith("pyarrow")
-                for f in d.iterdir()
-            )
-            if not has_incompatible:
-                sys.path.insert(0, str(d))
-
-import streamlit_app
-
-
-def main() -> None:
-    """Run the modernized 8-part FSS dashboard."""
-    streamlit_app.main()
-
+from streamlit_app import main
 
 if __name__ == "__main__":
     main()

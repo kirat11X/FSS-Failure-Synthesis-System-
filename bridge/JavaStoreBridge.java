@@ -7,8 +7,12 @@ import fss.core.EventRecord;
 import fss.core.RetrieveRequest;
 import fss.core.RetrieveResult;
 
+import java.io.BufferedOutputStream;
+import java.io.FileDescriptor;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.io.PrintStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
@@ -18,33 +22,42 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Non-invasive Java-to-Python bridge CLI.
+ * Non-invasive Java-to-Python bridge CLI and worker entrypoint.
  *
- * Provides:
- *   - ingest: Ingests wire envelope stream fixtures into a durable BlockStore.
- *   - retrieve: Performs bounded retrieval and streams envelopes to stdout with JSON metadata header.
- *   - synthesize / pipeline: End-to-end trigger that retrieves events and spawns the Python pipeline.
+ * Implements:
+ *   - Clean streams: redirects System.out to System.err; captures raw protocol OutputStream.
+ *   - Framed wire protocol: single-line UTF-8 NDJSON and legacy binary envelope streaming.
+ *   - Concurrency & locking: in-JVM ReentrantReadWriteLock + FileChannel.lock() on writes.
+ *   - uint64 integrity: Long.toUnsignedString and Long.parseUnsignedLong.
+ *   - W3C 32-hex trace_id propagation.
  */
 public final class JavaStoreBridge {
 
     public static void main(String[] args) {
+        // 1. Capture raw FileDescriptor.out for protocol frames
+        OutputStream protocolOut = new BufferedOutputStream(new FileOutputStream(FileDescriptor.out));
+        // 2. Immediately redirect System.setOut to System.err so stray logs or JVM banners cannot corrupt frames
+        System.setOut(System.err);
+
         if (args.length == 0 || args[0].equals("-h") || args[0].equals("--help") || args[0].equals("help")) {
-            printHelp();
+            printHelp(protocolOut);
             return;
         }
 
         String command = args[0].toLowerCase();
         try {
             switch (command) {
-                case "ingest" -> runIngest(args);
-                case "retrieve" -> runRetrieve(args);
-                case "synthesize", "pipeline" -> runPipeline(args);
+                case "ingest" -> runIngest(args, protocolOut);
+                case "retrieve" -> runRetrieve(args, protocolOut);
+                case "worker" -> runWorker(args);
+                case "synthesize", "pipeline" -> runPipeline(args, protocolOut);
                 default -> {
                     System.err.println("Unknown command: " + command);
-                    printHelp();
+                    printHelp(protocolOut);
                     System.exit(1);
                 }
             }
@@ -55,22 +68,30 @@ public final class JavaStoreBridge {
         }
     }
 
-    private static void printHelp() {
-        System.out.println("JavaStoreBridge: FSS Java Core & Python Pipeline Linkage");
-        System.out.println("Usage: java -cp <classpath> bridge.JavaStoreBridge <command> [options]");
-        System.out.println();
-        System.out.println("Commands:");
-        System.out.println("  ingest      Ingest wire envelope (.bin) fixtures into a BlockStore data file");
-        System.out.println("              Options: --store <path> [--fixture <bin_path>...]");
-        System.out.println();
-        System.out.println("  retrieve    Retrieve bounded events from BlockStore, streaming envelopes to stdout");
-        System.out.println("              Options: --store <path> [--source <ALL|id>] [--start <ns|ISO>]");
-        System.out.println("                       [--end <ns|ISO>] [--event-type <id>] [--max-events <n>]");
-        System.out.println();
-        System.out.println("  pipeline    Execute end-to-end retrieval, evidence decoding & failure synthesis");
-        System.out.println("  synthesize  Options: [--store <path>] [--fixture <bin_path>] [--query <text>]");
-        System.out.println("                       [--source <ALL|id>] [--start <ns|ISO>] [--end <ns|ISO>]");
-        System.out.println("                       [--max-events <n>] [--python <bin>] [--schema <yaml>]");
+    private static void printHelp(OutputStream out) {
+        try {
+            PrintStream ps = new PrintStream(out, true, StandardCharsets.UTF_8);
+            ps.println("JavaStoreBridge: FSS Java Core & Python Pipeline Linkage");
+            ps.println("Usage: java -cp <classpath> bridge.JavaStoreBridge <command> [options]");
+            ps.println();
+            ps.println("Commands:");
+            ps.println("  ingest      Ingest wire envelope (.bin) fixtures into a BlockStore data file");
+            ps.println("              Options: --store <path> [--fixture <bin_path>...] [--trace-id <id>]");
+            ps.println();
+            ps.println("  retrieve    Retrieve bounded events from BlockStore");
+            ps.println("              Options: --store <path> [--source <ALL|id>] [--start <ns|ISO>]");
+            ps.println("                       [--end <ns|ISO>] [--event-type <id>] [--max-events <n>]");
+            ps.println("                       [--format <ndjson|binary>] [--trace-id <id>]");
+            ps.println();
+            ps.println("  worker      Launch persistent AF_UNIX domain socket worker");
+            ps.println("              Options: [--socket <path>]");
+            ps.println();
+            ps.println("  pipeline    Execute end-to-end retrieval, evidence decoding & failure synthesis");
+            ps.println("  synthesize  Options: [--store <path>] [--fixture <bin_path>] [--query <text>]");
+            ps.println("                       [--source <ALL|id>] [--start <ns|ISO>] [--end <ns|ISO>]");
+            ps.println("                       [--max-events <n>] [--python <bin>] [--schema <yaml>]");
+            ps.flush();
+        } catch (Exception ignored) {}
     }
 
     private static Path findProjectRoot() {
@@ -108,14 +129,29 @@ public final class JavaStoreBridge {
         return currentDir;
     }
 
-    private static void runIngest(String[] args) throws IOException {
+    private static String extractTraceId(String[] args) {
+        for (int i = 0; i < args.length; i++) {
+            if ("--trace-id".equalsIgnoreCase(args[i]) && i + 1 < args.length) {
+                return args[i + 1].trim();
+            }
+        }
+        String envId = System.getenv("FSS_TRACE_ID");
+        if (envId != null && !envId.isBlank()) {
+            return envId.trim();
+        }
+        return UUID.randomUUID().toString().replace("-", "");
+    }
+
+    private static void runIngest(String[] args, OutputStream protocolOut) throws IOException {
         String storePath = null;
         List<String> fixtures = new ArrayList<>();
+        String traceId = extractTraceId(args);
 
         for (int i = 1; i < args.length; i++) {
             switch (args[i]) {
                 case "--store" -> storePath = args[++i];
                 case "--fixture" -> fixtures.add(args[++i]);
+                case "--trace-id" -> traceId = args[++i];
                 default -> {
                     if (storePath == null && !args[i].startsWith("-")) {
                         storePath = args[i];
@@ -142,24 +178,32 @@ public final class JavaStoreBridge {
         }
 
         int totalIngested = 0;
-        try (BlockStore store = BlockStore.open(sPath)) {
-            for (String f : fixtures) {
-                Path fPath = Path.of(f);
-                if (!fPath.isAbsolute()) {
-                    fPath = Files.exists(fPath) ? fPath.toAbsolutePath() : projectRoot.resolve(fPath);
+        try (AutoCloseable writeLock = StoreLockManager.acquireWriteLock(sPath)) {
+            try (BlockStore store = StoreLockManager.openWithRetry(sPath, 3000)) {
+                for (String f : fixtures) {
+                    Path fPath = Path.of(f);
+                    if (!fPath.isAbsolute()) {
+                        fPath = Files.exists(fPath) ? fPath.toAbsolutePath() : projectRoot.resolve(fPath);
+                    }
+                    if (!Files.exists(fPath)) {
+                        JavaBridgeWorker.logStructured(traceId, "WARN", "Fixture file not found: " + f);
+                        continue;
+                    }
+                    byte[] data = Files.readAllBytes(fPath);
+                    int count = ingestEnvelopeStream(store, data);
+                    JavaBridgeWorker.logStructured(traceId, "INFO", String.format("Ingested %d events from %s", count, f));
+                    totalIngested += count;
                 }
-                if (!Files.exists(fPath)) {
-                    System.err.println("Warning: fixture file not found: " + f);
-                    continue;
-                }
-                byte[] data = Files.readAllBytes(fPath);
-                int count = ingestEnvelopeStream(store, data);
-                System.err.printf("Ingested %d events from %s%n", count, f);
-                totalIngested += count;
+                store.sync();
             }
-            store.sync();
+        } catch (Exception e) {
+            JavaBridgeWorker.logStructured(traceId, "ERROR", "Ingest error: " + e.getMessage());
+            throw new IOException("Ingest failed: " + e.getMessage(), e);
         }
-        System.out.printf("Successfully ingested %d events into BlockStore at %s%n", totalIngested, sPath);
+
+        String msg = String.format("Successfully ingested %d events into BlockStore at %s%n", totalIngested, sPath);
+        protocolOut.write(msg.getBytes(StandardCharsets.UTF_8));
+        protocolOut.flush();
     }
 
     private static int ingestEnvelopeStream(BlockStore store, byte[] data) throws IOException {
@@ -183,13 +227,15 @@ public final class JavaStoreBridge {
         return count;
     }
 
-    private static void runRetrieve(String[] args) throws IOException {
+    private static void runRetrieve(String[] args, OutputStream protocolOut) throws IOException {
         String storePath = null;
         String sourceStr = "ALL";
         String startStr = null;
         String endStr = null;
         Integer eventType = null;
         int maxEvents = 100;
+        String format = "binary"; // Default for backwards compatibility
+        String traceId = extractTraceId(args);
 
         for (int i = 1; i < args.length; i++) {
             switch (args[i]) {
@@ -199,6 +245,9 @@ public final class JavaStoreBridge {
                 case "--end" -> endStr = args[++i];
                 case "--event-type" -> eventType = parseEventType(args[++i]);
                 case "--max-events" -> maxEvents = Integer.parseInt(args[++i]);
+                case "--format" -> format = args[++i].toLowerCase();
+                case "--ndjson" -> format = "ndjson";
+                case "--trace-id" -> traceId = args[++i];
                 default -> {
                     if (storePath == null && !args[i].startsWith("-")) {
                         storePath = args[i];
@@ -222,27 +271,58 @@ public final class JavaStoreBridge {
             System.exit(1);
         }
 
-        try (BlockStore store = BlockStore.open(sPath)) {
-            long tStart = (startStr != null) ? parseTimeNs(startStr) : findMinTs(store);
-            long tEnd = (endStr != null) ? parseTimeNs(endStr) : findMaxTs(store, tStart);
+        try (AutoCloseable readLock = StoreLockManager.acquireReadLock(sPath)) {
+            try (BlockStore store = StoreLockManager.openWithRetry(sPath, 3000)) {
+                long minTs = findMinTs(store);
+                long maxTs = findMaxTs(store, minTs);
+                long tStart = (startStr != null) ? parseTimeNs(startStr) : minTs;
+                long tEnd = (endStr != null) ? parseTimeNs(endStr) : maxTs;
 
-            RetrieveRequest req = buildRequest(sourceStr, tStart, tEnd, maxEvents, eventType);
-            RetrieveResult res = store.retrieve(req);
+                if (Long.compareUnsigned(tEnd, tStart) <= 0) {
+                    if ("ndjson".equalsIgnoreCase(format)) {
+                        String envelopeJson = String.format(
+                            "{\"status\":\"EMPTY\",\"trace_id\":\"%s\",\"truncated\":false,\"count\":0,\"min_ts_ns\":\"%s\",\"max_ts_ns\":\"%s\",\"events\":[],\"data_gaps\":[]}\n",
+                            traceId, Long.toUnsignedString(minTs), Long.toUnsignedString(maxTs)
+                        );
+                        protocolOut.write(envelopeJson.getBytes(StandardCharsets.UTF_8));
+                        protocolOut.flush();
+                    } else {
+                        String header = "{\"truncated\": false, \"count\": 0}\n";
+                        protocolOut.write(header.getBytes(StandardCharsets.UTF_8));
+                        protocolOut.flush();
+                    }
+                    return;
+                }
 
-            // Output JSON metadata header on the very first line of stdout
-            String header = String.format("{\"truncated\": %b, \"count\": %d}\n", res.truncated(), res.events().size());
-            System.out.write(header.getBytes(StandardCharsets.UTF_8));
+                RetrieveRequest req = buildRequest(sourceStr, tStart, tEnd, maxEvents, eventType);
+                RetrieveResult res = store.retrieve(req);
+                JavaBridgeWorker.logStructured(traceId, "INFO", String.format("Retrieved %d events (truncated: %b)", res.events().size(), res.truncated()));
 
-            // Stream concatenated wire envelopes
-            for (EventRecord ev : res.events()) {
-                byte[] envelope = EnvelopeCodec.encodeEnvelope(ev);
-                System.out.write(envelope);
+                if ("ndjson".equalsIgnoreCase(format)) {
+                    String envelopeJson = JavaBridgeWorker.formatRetrievalEnvelopeJson(res, traceId, minTs, maxTs);
+                    protocolOut.write(envelopeJson.getBytes(StandardCharsets.UTF_8));
+                } else {
+                    // Legacy binary envelope streaming
+                    String header = String.format("{\"truncated\": %b, \"count\": %d}\n", res.truncated(), res.events().size());
+                    protocolOut.write(header.getBytes(StandardCharsets.UTF_8));
+                    for (EventRecord ev : res.events()) {
+                        byte[] envelope = EnvelopeCodec.encodeEnvelope(ev);
+                        protocolOut.write(envelope);
+                    }
+                }
+                protocolOut.flush();
             }
-            System.out.flush();
+        } catch (Exception e) {
+            JavaBridgeWorker.logStructured(traceId, "ERROR", "Retrieve failed: " + e.getMessage());
+            throw new IOException("Retrieve error: " + e.getMessage(), e);
         }
     }
 
-    private static void runPipeline(String[] args) throws Exception {
+    private static void runWorker(String[] args) {
+        JavaBridgeWorker.main(args);
+    }
+
+    private static void runPipeline(String[] args, OutputStream protocolOut) throws Exception {
         String storePath = null;
         String fixturePath = null;
         String query = "Why did drone 474 leave formation?";
@@ -255,6 +335,7 @@ public final class JavaStoreBridge {
         String schemaPath = "schemas/drone_v0.yaml";
         String jsonOutFile = null;
         boolean jsonOut = false;
+        String traceId = extractTraceId(args);
 
         for (int i = 1; i < args.length; i++) {
             switch (args[i]) {
@@ -275,6 +356,7 @@ public final class JavaStoreBridge {
                 case "--max-events" -> maxEvents = Integer.parseInt(args[++i]);
                 case "--python" -> pythonBin = args[++i];
                 case "--schema" -> schemaPath = args[++i];
+                case "--trace-id" -> traceId = args[++i];
                 case "--json-out" -> {
                     if (i + 1 < args.length && !args[i + 1].startsWith("--")) {
                         jsonOutFile = args[++i];
@@ -314,12 +396,14 @@ public final class JavaStoreBridge {
                 fPath = Files.exists(fPath) ? fPath.toAbsolutePath() : projectRoot.resolve(fPath);
             }
             if (!Files.exists(sPath) || Files.size(sPath) == 0) {
-                System.err.printf("[JavaStoreBridge] Initializing store %s with fixture %s...%n", sPath, fPath);
-                try (BlockStore store = BlockStore.open(sPath)) {
-                    byte[] data = Files.readAllBytes(fPath);
-                    int count = ingestEnvelopeStream(store, data);
-                    store.sync();
-                    System.err.printf("[JavaStoreBridge] Ingested %d events into store.%n", count);
+                JavaBridgeWorker.logStructured(traceId, "INFO", String.format("Initializing store %s with fixture %s...", sPath, fPath));
+                try (AutoCloseable writeLock = StoreLockManager.acquireWriteLock(sPath)) {
+                    try (BlockStore store = StoreLockManager.openWithRetry(sPath, 3000)) {
+                        byte[] data = Files.readAllBytes(fPath);
+                        int count = ingestEnvelopeStream(store, data);
+                        store.sync();
+                        JavaBridgeWorker.logStructured(traceId, "INFO", String.format("Ingested %d events into store.", count));
+                    }
                 }
             }
         }
@@ -328,13 +412,15 @@ public final class JavaStoreBridge {
         RetrieveResult res;
         long tStart;
         long tEnd;
-        try (BlockStore store = BlockStore.open(sPath)) {
-            tStart = (startStr != null) ? parseTimeNs(startStr) : findMinTs(store);
-            tEnd = (endStr != null) ? parseTimeNs(endStr) : findMaxTs(store, tStart);
-            RetrieveRequest req = buildRequest(sourceStr, tStart, tEnd, maxEvents, eventType);
-            System.err.printf("[JavaStoreBridge] Executing bounded retrieval: %s%n", req);
-            res = store.retrieve(req);
-            System.err.printf("[JavaStoreBridge] Retrieved %d events (truncated: %b)%n", res.events().size(), res.truncated());
+        try (AutoCloseable readLock = StoreLockManager.acquireReadLock(sPath)) {
+            try (BlockStore store = StoreLockManager.openWithRetry(sPath, 3000)) {
+                tStart = (startStr != null) ? parseTimeNs(startStr) : findMinTs(store);
+                tEnd = (endStr != null) ? parseTimeNs(endStr) : findMaxTs(store, tStart);
+                RetrieveRequest req = buildRequest(sourceStr, tStart, tEnd, maxEvents, eventType);
+                JavaBridgeWorker.logStructured(traceId, "INFO", String.format("Executing bounded retrieval: %s", req));
+                res = store.retrieve(req);
+                JavaBridgeWorker.logStructured(traceId, "INFO", String.format("Retrieved %d events (truncated: %b)", res.events().size(), res.truncated()));
+            }
         }
 
         // Resolve Python executable
@@ -367,7 +453,7 @@ public final class JavaStoreBridge {
             cmd.add("--json-out");
         }
 
-        System.err.printf("[JavaStoreBridge] Spawning Python pipeline: %s%n%n", String.join(" ", cmd));
+        JavaBridgeWorker.logStructured(traceId, "INFO", String.format("Spawning Python pipeline: %s", String.join(" ", cmd)));
 
         ProcessBuilder pb = new ProcessBuilder(cmd);
         pb.directory(projectRoot.toFile());
@@ -378,6 +464,7 @@ public final class JavaStoreBridge {
         String rootStr = projectRoot.toAbsolutePath().toString();
         String existingPyPath = pbEnv.get("PYTHONPATH");
         pbEnv.put("PYTHONPATH", existingPyPath == null ? rootStr : rootStr + ":" + existingPyPath);
+        pbEnv.put("FSS_TRACE_ID", traceId);
 
         Process proc = pb.start();
 
@@ -389,7 +476,7 @@ public final class JavaStoreBridge {
             }
             os.flush();
         } catch (IOException ioe) {
-            System.err.println("[JavaStoreBridge] Notice: Python process closed stdin: " + ioe.getMessage());
+            JavaBridgeWorker.logStructured(traceId, "WARN", "Notice: Python process closed stdin: " + ioe.getMessage());
         }
 
         boolean finished = false;
@@ -397,7 +484,7 @@ public final class JavaStoreBridge {
         try {
             finished = proc.waitFor(300, TimeUnit.SECONDS);
             if (!finished) {
-                System.err.println("[JavaStoreBridge] Error: Python pipeline timed out after 300 seconds, terminating forcibly...");
+                JavaBridgeWorker.logStructured(traceId, "ERROR", "Python pipeline timed out after 300 seconds, terminating forcibly...");
                 proc.destroyForcibly();
                 proc.waitFor(5, TimeUnit.SECONDS);
                 exitCode = 124;
@@ -405,14 +492,14 @@ public final class JavaStoreBridge {
                 exitCode = proc.exitValue();
             }
         } catch (InterruptedException ie) {
-            System.err.println("[JavaStoreBridge] Interrupted while waiting for Python pipeline, terminating forcibly...");
+            JavaBridgeWorker.logStructured(traceId, "ERROR", "Interrupted while waiting for Python pipeline, terminating forcibly...");
             proc.destroyForcibly();
             Thread.currentThread().interrupt();
             exitCode = 130;
         }
 
         if (exitCode != 0) {
-            System.err.println("[JavaStoreBridge] Pipeline runner exited with code " + exitCode);
+            JavaBridgeWorker.logStructured(traceId, "ERROR", "Pipeline runner exited with code " + exitCode);
             System.exit(exitCode);
         }
     }
@@ -436,7 +523,7 @@ public final class JavaStoreBridge {
         boolean found = false;
         for (BlockInfo b : store.blocks()) {
             if (!b.empty() && b.recordCount() > 0) {
-                if (Long.compareUnsigned(b.minTsNs(), min) < 0) {
+                if (!found || Long.compareUnsigned(b.minTsNs(), min) < 0) {
                     min = b.minTsNs();
                     found = true;
                 }
@@ -450,22 +537,33 @@ public final class JavaStoreBridge {
         boolean found = false;
         for (BlockInfo b : store.blocks()) {
             if (!b.empty() && b.recordCount() > 0) {
-                if (Long.compareUnsigned(b.maxTsNs(), max) > 0) {
+                if (!found || Long.compareUnsigned(b.maxTsNs(), max) > 0) {
                     max = b.maxTsNs();
                     found = true;
                 }
             }
         }
         if (!found) {
-            return tStart + 1_000_000_000L;
+            long delta = 1_000_000_000L;
+            if (Long.compareUnsigned(-1L - tStart, delta) < 0) {
+                return -1L;
+            }
+            return tStart + delta;
         }
-        // Ensure tEnd > tStart
         if (Long.compareUnsigned(max, tStart) <= 0) {
-            max = tStart + 1_000_000_000L;
+            long delta = 1_000_000_000L;
+            if (Long.compareUnsigned(-1L - tStart, delta) < 0) {
+                return -1L;
+            }
+            max = tStart + delta;
         } else {
-            max += 1_000_000_000L; // 1s buffer
+            long delta = 1_000_000_000L;
+            if (Long.compareUnsigned(-1L - max, delta) >= 0) {
+                max += delta;
+            } else {
+                max = -1L;
+            }
         }
-        // Cap window at MAX_WINDOW_NS
         if (Long.compareUnsigned(max - tStart, RetrieveRequest.MAX_WINDOW_NS) > 0) {
             max = tStart + RetrieveRequest.MAX_WINDOW_NS;
         }
@@ -490,7 +588,6 @@ public final class JavaStoreBridge {
     }
 
     private static String resolvePython(String candidate, Path projectRoot) {
-        // 1. Explicit candidate argument
         if (candidate != null && !candidate.isBlank()) {
             Path candPath = Path.of(candidate);
             if (!candPath.isAbsolute()) {
@@ -504,7 +601,23 @@ public final class JavaStoreBridge {
             }
         }
 
-        // 2. PATH lookup (command lookup or testing binary execution)
+        Path venvPy = projectRoot.resolve(".venv/bin/python");
+        if (Files.exists(venvPy) && Files.isExecutable(venvPy)) {
+            return venvPy.toAbsolutePath().toString();
+        }
+        Path venvPy3 = projectRoot.resolve(".venv/bin/python3");
+        if (Files.exists(venvPy3) && Files.isExecutable(venvPy3)) {
+            return venvPy3.toAbsolutePath().toString();
+        }
+
+        String envPython = System.getenv("PYTHON");
+        if (envPython != null && !envPython.isBlank()) {
+            Path ep = Path.of(envPython);
+            if (Files.exists(ep) || canExecute(envPython)) {
+                return envPython;
+            }
+        }
+
         String envPath = System.getenv("PATH");
         if (envPath != null) {
             for (String dir : envPath.split(java.io.File.pathSeparator)) {
@@ -521,26 +634,6 @@ public final class JavaStoreBridge {
             }
         }
 
-        // 3. PYTHON environment variable
-        String envPython = System.getenv("PYTHON");
-        if (envPython != null && !envPython.isBlank()) {
-            Path ep = Path.of(envPython);
-            if (Files.exists(ep) || canExecute(envPython)) {
-                return envPython;
-            }
-        }
-
-        // 4. Virtual environment relative to projectRoot
-        Path venvPy = projectRoot.resolve(".venv/bin/python");
-        if (Files.exists(venvPy) && Files.isExecutable(venvPy)) {
-            return venvPy.toAbsolutePath().toString();
-        }
-        Path venvPy3 = projectRoot.resolve(".venv/bin/python3");
-        if (Files.exists(venvPy3) && Files.isExecutable(venvPy3)) {
-            return venvPy3.toAbsolutePath().toString();
-        }
-
-        // 5. Test execution or fallback
         if (canExecute("python3")) {
             return "python3";
         }

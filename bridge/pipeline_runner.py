@@ -11,9 +11,10 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 # Ensure project root is in sys.path
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -26,7 +27,15 @@ from fss_py.model import ALL, RetrievalRequest, RetrievalResult
 from fss_py.schema import load_schema_file
 from fss_py.wire import iter_envelopes
 
+from bridge.hybrid_rag import (
+    HistoricalIncident,
+    format_exemplars_cot,
+    retrieve_historical_exemplars,
+    retrieve_hybrid_knowledge,
+)
 from bridge.synthesizer import (
+    DEFAULT_NUM_CTX,
+    DEFAULT_THINKING_BUDGET,
     build_llm_context,
     retrieve_relevant_knowledge,
     synthesize_and_validate,
@@ -65,6 +74,7 @@ def render_report(
     synthesis: dict[str, Any],
     val_report: Any,
     model_name: str,
+    exemplars: Sequence[HistoricalIncident] | None = None,
 ) -> str:
     """Render the official 8-part FSS Failure Synthesis Report."""
     ret_req = retrieval_res.request
@@ -122,12 +132,13 @@ def render_report(
 
         for ev in events:
             f_str = ", ".join(f"{k}={v}" for k, v in ev.get("fields", {}).items())
+            ts = ev.get("timestamp_ns") or ev.get("timestamp") or 0
             lines.append(
                 col_fmt.format(
                     str(ev["source_id"]),
-                    fmt_ns(ev["timestamp_ns"]),
+                    fmt_ns(ts),
                     ev.get("event_name") or ev.get("event_type"),
-                    ev.get("decode_status"),
+                    str(ev.get("decode_status")),
                     epistemic_tag(ev),
                     ev["event_id"],
                     f_str,
@@ -148,16 +159,24 @@ def render_report(
 
     # [5] Knowledge
     lines.append("[5] Knowledge")
-    lines.append(f"Retrieved {len(knowledge)} relevant reference chunks:")
+    lines.append(f"Retrieved {len(knowledge)} relevant reference chunks (BM25S + Dense + RRF + Reranker):")
     for k in knowledge:
         lines.append(f"- `{k['chunk']}` ({k['kind']}, {k['domain']}; explains {k.get('explains', 'N/A')}):")
         for kline in k["content"].splitlines():
             lines.append(f"    {kline}")
+    if exemplars:
+        lines.append("")
+        lines.append(f"Retrieved {len(exemplars)} Historical Incident Exemplars (RCACopilot Few-Shot CoT):")
+        for ex in exemplars:
+            lines.append(f"- `incident/{ex.incident_id}`: {ex.title}")
+            lines.append(f"    Symptoms: {ex.symptoms}")
+            lines.append(f"    Chain-of-Thought: {ex.condensed_cot}")
+            lines.append(f"    Root Cause: {ex.root_cause}")
     lines.append("")
 
     # [6] LLM Context / Evidence JSON
     lines.append("[6] LLM context")
-    llm_context = build_llm_context(evidence, query, knowledge)
+    llm_context = build_llm_context(evidence, query, knowledge, exemplars=exemplars)
     lines.append("```text")
     lines.append(llm_context)
     lines.append("```")
@@ -173,6 +192,10 @@ def render_report(
     lines.append(f"**Confidence:** {synthesis.get('confidence')}")
     lines.append("")
 
+    if synthesis.get("reasoning_truncated"):
+        lines.append("⚠️ **Reasoning Status:** Truncated by Qwen3 Think-Budget Guard (> 1024 tokens)")
+        lines.append("")
+
     lines.append("**Contributing events** (verified against evidence):")
     valid_set = set(val_report.valid_citations)
     contributing = synthesis.get("contributing_events", [])
@@ -180,7 +203,8 @@ def render_report(
         for ce in contributing:
             eid = ce.get("event_id", "")
             mark = "✓" if eid in valid_set else "✗ NOT IN EVIDENCE"
-            ts_str = f" at {fmt_ns(ce['timestamp'])}" if ce.get("timestamp") else ""
+            ts = ce.get("timestamp") or ce.get("timestamp_ns")
+            ts_str = f" at {fmt_ns(ts)}" if ts else ""
             lines.append(f"- {mark} {eid}: Source {ce.get('source_id')} {ce.get('event_type')}{ts_str}")
     else:
         lines.append("- None")
@@ -207,6 +231,9 @@ def render_report(
     # [8] Validator
     lines.append("[8] Validator")
     lines.append(f"**Verdict:** {val_report.verdict}")
+    badge = getattr(val_report, "badge", None)
+    if badge:
+        lines.append(f"**Validation Badge:** {badge}")
     if val_report.verdict == "ACCEPTED":
         lines.append("✓ All cited event IDs verified against retrieved evidence.")
         lines.append("✓ Multi-source clock caveats present and verified.")
@@ -216,11 +243,19 @@ def render_report(
         for note in val_report.notes:
             lines.append(f"  - {note}")
     else:
-        lines.append("❌ Synthesis REJECTED:")
+        badge_str = f" ({badge})" if badge else ""
+        lines.append(f"❌ Synthesis REJECTED{badge_str}:")
         for note in val_report.notes:
             lines.append(f"  - {note}")
         if val_report.invalid_citations:
             lines.append(f"  - Hallucinated event IDs: {val_report.invalid_citations}")
+        entity_mismatches = getattr(val_report, "entity_bindings", [])
+        if entity_mismatches:
+            lines.append(f"  - Entity Mismatches (Deceptive Grounding): {len(entity_mismatches)} detected")
+        force_axes = getattr(val_report, "force_axes", {})
+        overclaims = [oc for ocs in force_axes.values() for oc in ocs]
+        if overclaims:
+            lines.append(f"  - ForceBench Overclaims: {len(overclaims)} detected across 5 axes")
     lines.append("")
     lines.append(line_div)
 
@@ -238,6 +273,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-events", type=int, default=100, help="Retrieval max_events")
     parser.add_argument("--truncated", type=lambda s: s.lower() == "true", default=False, help="Whether retrieval was truncated")
     parser.add_argument("--event-type", type=int, default=None, help="Retrieval event_type filter")
+    parser.add_argument("--enable-thinking", action="store_true", default=False, help="Enable Qwen3 thinking mode with sampling")
+    parser.add_argument("--thinking-budget", type=int, default=DEFAULT_THINKING_BUDGET, help="Token budget for thinking phase")
+    parser.add_argument("--num-ctx", type=int, default=DEFAULT_NUM_CTX, help="Context window length (num_ctx >= 16384)")
+    parser.add_argument("--exemplars-k", type=int, default=3, help="Number of historical incident exemplars to retrieve (3-15)")
     parser.add_argument(
         "--json-out",
         nargs="?",
@@ -271,7 +310,7 @@ def main(argv: list[str] | None = None) -> int:
     decoded = decode_all(events, registry)
 
     # 4. Reconstruct RetrievalResult for evidence context
-    src_val = ALL if args.source.upper() == "ALL" else int(args.source)
+    src_val = ALL if str(args.source).upper() == "ALL" else int(args.source)
     t_start = args.start
     t_end = args.end
     if t_end <= t_start:
@@ -293,11 +332,21 @@ def main(argv: list[str] | None = None) -> int:
     # 5. Build evidence JSON
     evidence = build_evidence(decoded, query=args.query, retrieval=retrieval_res)
 
-    # 6. Retrieve knowledge & synthesize
+    # 6. Retrieve knowledge & historical exemplars via Hybrid RAG
     knowledge = retrieve_relevant_knowledge(evidence, args.query)
-    synthesis, val_report, model_name = synthesize_and_validate(evidence, args.query)
+    exemplars = retrieve_historical_exemplars(args.query, evidence=evidence, k=args.exemplars_k)
 
-    # 7. Output report or JSON
+    # 7. Synthesize & validate with context window enforcement & think budget guard
+    synthesis, val_report, model_name = synthesize_and_validate(
+        evidence,
+        args.query,
+        enable_thinking=args.enable_thinking,
+        thinking_budget=args.thinking_budget,
+        effective_num_ctx=args.num_ctx,
+        exemplars_k=args.exemplars_k,
+    )
+
+    # 8. Output report or JSON
     report = render_report(
         args.query,
         retrieval_res,
@@ -306,18 +355,24 @@ def main(argv: list[str] | None = None) -> int:
         synthesis,
         val_report,
         model_name,
+        exemplars=exemplars,
     )
 
     if args.json_out:
         out = {
             "evidence": evidence,
             "knowledge": knowledge,
+            "exemplars": [asdict(ex) for ex in exemplars],
             "synthesis": synthesis,
             "validation": {
                 "verdict": val_report.verdict,
+                "badge": str(getattr(val_report, "badge", val_report.verdict)),
                 "valid_citations": val_report.valid_citations,
                 "invalid_citations": val_report.invalid_citations,
                 "notes": val_report.notes,
+                "tier_results": getattr(val_report, "tier_results", {}),
+                "force_axes": getattr(val_report, "force_axes", {}),
+                "entity_bindings": getattr(val_report, "entity_bindings", []),
             },
             "model": model_name,
             "report": report,

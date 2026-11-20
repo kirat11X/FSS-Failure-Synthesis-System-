@@ -1,0 +1,106 @@
+name: Dual-Runtime CI (Java 21 & Python)
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - integration-bridge
+      - "**/integration-bridge"
+  pull_request:
+    branches:
+      - main
+      - master
+      - integration-bridge
+      - "**/integration-bridge"
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    name: Test (Python ${{ matrix.python-version }} + Java 21)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Java 21 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "21"
+          cache: "maven"
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+
+      - name: Compile Java Core & Bridge Classes
+        run: |
+          mvn -f fss-core/pom.xml compile
+          bash bridge/compile.sh
+
+      - name: Install Python Dependencies & Editable Package
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          if [ -f requirements-app.txt ]; then pip install -r requirements-app.txt; fi
+          pip install -e .
+
+      - name: Verify Editable Install & Architecture
+        run: |
+          python -c "import bridge; import fss_py; print('Bridge and fss_py imports OK')"
+          python -c "import streamlit_app; print('Streamlit app imports OK')"
+
+      - name: Run 10 Verification Test Suites (pytest + Hypothesis)
+        run: |
+          pytest \
+            tests/test_uint64_roundtrip.py \
+            tests/test_pipe_deadlock_64kb.py \
+            tests/test_timeout_orphan_cleanup.py \
+            tests/test_stdout_pollution.py \
+            tests/test_zero_event_contract.py \
+            tests/test_blockstore_concurrency.py \
+            tests/test_streamlit_rerun_delegation.py \
+            tests/test_context_budget_guard.py \
+            tests/test_qwen3_think_budget.py \
+            tests/test_adversarial_citations.py \
+            -v
+
+      - name: Headless Streamlit Startup Check
+        run: |
+          PYTHONUNBUFFERED=1 XLA_PYTHON_CLIENT_PREALLOCATE=false python -m streamlit run app.py \
+            --server.headless true \
+            --server.port 8501 \
+            --browser.gatherUsageStats false &
+          STREAMLIT_PID=$!
+          echo "Spawned Streamlit server on PID $STREAMLIT_PID"
+
+          HEALTHY=0
+          for i in $(seq 1 30); do
+            if curl -sf -m 2 http://127.0.0.1:8501/_stcore/health; then
+              echo "Streamlit health check passed on attempt $i"
+              HEALTHY=1
+              break
+            fi
+            sleep 1
+          done
+
+          # Cleanup
+          kill -TERM $STREAMLIT_PID 2>/dev/null || true
+          for _ in $(seq 1 5); do
+            kill -0 $STREAMLIT_PID 2>/dev/null || break
+            sleep 1
+          done
+          kill -KILL $STREAMLIT_PID 2>/dev/null || true
+
+          if [ "$HEALTHY" -ne 1 ]; then
+            echo "Streamlit failed to reach healthy state within 30s"
+            exit 1
+          fi

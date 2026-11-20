@@ -3,11 +3,13 @@
 # Failure Synthesis System (FSS) — Unified Startup Script
 #
 # Launches the integrated end-to-end FSS stack:
-#   1. Verifies Java 21+ and Python 3.11+
-#   2. Verifies / compiles Java BlockStore bridge classes
-#   3. Checks Ollama daemon and local Qwen model availability
-#   4. Starts the modernized 8-part Streamlit dashboard
-#   5. Outputs system access URLs and diagnostic test commands
+#   1. Process-group cleanup trap & signal handling (SIGTERM, 5s wait, SIGKILL)
+#   2. Verifies JDK 16+ (JEP-380) and Python 3.11+
+#   3. Verifies Java BlockStore bridge freshness vs sources; recompiles if stale
+#   4. Verifies editable package installation (pip install -e .)
+#   5. Confirms write permissions on BlockStore storage directory
+#   6. Probes local LLM server (Ollama /api/ps or llama-server /health, context guard)
+#   7. Launches modernized Streamlit dashboard via app.py
 # ==============================================================================
 set -euo pipefail
 
@@ -20,22 +22,94 @@ export no_proxy="127.0.0.1,localhost"
 
 # Configuration defaults
 PORT="${PORT:-8501}"
-URL="http://127.0.0.1:$PORT"
+SERVER_ADDRESS="${SERVER_ADDRESS:-${STREAMLIT_SERVER_ADDRESS:-127.0.0.1}}"
 OLLAMA_URL="${OLLAMA_URL:-http://127.0.0.1:11434}"
+
+# CLI options parsing
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --port)
+      PORT="$2"
+      shift 2
+      ;;
+    --address)
+      SERVER_ADDRESS="$2"
+      shift 2
+      ;;
+    -h|--help)
+      cat << 'EOF'
+Failure Synthesis System (FSS) Startup Launcher
+
+Usage:
+  ./start.sh [OPTIONS]
+  ./start_all.sh [OPTIONS]
+
+Options:
+  -h, --help            Show this help message and exit
+  --port <PORT>         Override the Streamlit server port (default: 8501 or $PORT)
+  --address <ADDR>      Override the server listen address (default: 127.0.0.1 or $SERVER_ADDRESS)
+
+Environment Variables:
+  PORT                  Port to listen on (default: 8501)
+  SERVER_ADDRESS        Address to bind to (e.g. 0.0.0.0 in Docker, default: 127.0.0.1)
+  OLLAMA_URL            Ollama API endpoint (default: http://127.0.0.1:11434)
+EOF
+      exit 0
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+HEALTH_URL="http://127.0.0.1:$PORT"
+URL="http://${SERVER_ADDRESS}:$PORT"
 
 # Color output helpers
 ok()   { printf '  \033[32m✓\033[0m %s\n' "$*"; }
 warn() { printf '  \033[33m!\033[0m %s\n' "$*"; }
 die()  { printf '  \033[31m✗\033[0m %s\n' "$*" >&2; exit 1; }
 
+# ------------------------------------------------------------------------------
+# 0. Process-Group Cleanup Trap
+# ------------------------------------------------------------------------------
+cleanup() {
+  local exit_code=$?
+  trap - EXIT INT TERM
+  # Clean up stale IPC socket
+  rm -f /tmp/fss_bridge.sock
+
+  # Terminate child background processes
+  local child_pids
+  child_pids=$(jobs -p 2>/dev/null || true)
+  if [ -n "$child_pids" ]; then
+    # shellcheck disable=SC2086
+    kill -TERM $child_pids 2>/dev/null || true
+    for _ in 1 2 3 4 5; do
+      sleep 1
+      child_pids=$(jobs -p 2>/dev/null || true)
+      [ -z "$child_pids" ] && break
+    done
+    if [ -n "$child_pids" ]; then
+      # shellcheck disable=SC2086
+      kill -KILL $child_pids 2>/dev/null || true
+    fi
+  fi
+  exit "$exit_code"
+}
+trap cleanup EXIT INT TERM
+
+# Ensure any stale socket is removed prior to startup
+rm -f /tmp/fss_bridge.sock
+
 echo "================================================================================"
 echo "  Failure Synthesis System (FSS) — System Pre-Flight & Integration Checks"
 echo "================================================================================"
 
 # ------------------------------------------------------------------------------
-# 1. Environment and Runtimes Verification (Java 21+, Python 3.11+)
+# 1. Environment and Runtimes Verification (Java 16+/21+, Python 3.11+)
 # ------------------------------------------------------------------------------
-echo "[1/4] Checking Runtimes (Java 21+ and Python 3.11+)..."
+echo "[1/5] Checking Runtimes (Java 16+ and Python 3.11+)..."
 
 # Source environment definitions if present
 if [ -f "fss_env.sh" ]; then
@@ -49,51 +123,125 @@ if [ -d ".venv" ] && [ -f ".venv/bin/activate" ] && [ -z "${VIRTUAL_ENV:-}" ]; t
   source .venv/bin/activate
 fi
 
-# Verify Java
-command -v java >/dev/null 2>&1 || die "Java runtime not found on PATH. Java 21+ is required."
-JAVA_VERSION_STR="$(java -version 2>&1 | awk -F '"' '/version/ {print $2}' | head -n 1)"
-JAVA_MAJOR="$(echo "$JAVA_VERSION_STR" | awk -F '.' '{print $1}')"
-if [ "$JAVA_MAJOR" -lt 21 ]; then
-  die "Detected Java version $JAVA_VERSION_STR. FSS requires Java 21+ (found major: $JAVA_MAJOR)."
+# Verify Java: probe $JAVA_HOME/bin/java first, fallback to PATH
+JAVA_BIN=""
+if [ -n "${JAVA_HOME:-}" ] && [ -x "$JAVA_HOME/bin/java" ]; then
+  JAVA_BIN="$JAVA_HOME/bin/java"
+elif command -v java >/dev/null 2>&1; then
+  JAVA_BIN="$(command -v java)"
+else
+  die "Java runtime not found on PATH or JAVA_HOME. Java 16+ (recommended 21+) is required."
 fi
-ok "Java runtime: OpenJDK $JAVA_VERSION_STR (version 21+ verified)"
+
+JAVA_VERSION_STR="$("$JAVA_BIN" -version 2>&1 | awk -F '"' '/version/ {print $2}' | head -n 1)"
+JAVA_MAJOR="$(echo "$JAVA_VERSION_STR" | awk -F '.' '{print $1}')"
+if [ -z "$JAVA_MAJOR" ] || [ "$JAVA_MAJOR" -lt 16 ]; then
+  die "Detected Java version $JAVA_VERSION_STR. FSS requires at least Java 16+ for JEP-380 Unix domain sockets (found: $JAVA_MAJOR)."
+fi
+if [ "$JAVA_MAJOR" -lt 21 ]; then
+  warn "Detected Java version $JAVA_VERSION_STR. FSS recommends Java 21+ for production AOT/JIT optimizations."
+fi
+ok "Java runtime: OpenJDK $JAVA_VERSION_STR ($JAVA_BIN)"
 
 # Verify Python
-PYTHON="${PYTHON:-$(command -v python3 || command -v python || true)}"
-[ -n "$PYTHON" ] || die "Python interpreter not found on PATH. Python 3.11+ is required."
-"$PYTHON" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' \
-  || die "Detected $("$PYTHON" -V 2>&1). FSS requires Python 3.11+."
-ok "Python interpreter: $("$PYTHON" -V 2>&1) ($PYTHON)"
+VENV_PYTHON=""
+if [ -x "$ROOT_DIR/.venv/bin/python" ]; then
+  VENV_PYTHON="$ROOT_DIR/.venv/bin/python"
+elif [ -n "${VIRTUAL_ENV:-}" ] && [ -x "$VIRTUAL_ENV/bin/python" ]; then
+  VENV_PYTHON="$VIRTUAL_ENV/bin/python"
+elif command -v python3 >/dev/null 2>&1; then
+  VENV_PYTHON="$(command -v python3)"
+elif command -v python >/dev/null 2>&1; then
+  VENV_PYTHON="$(command -v python)"
+else
+  die "Python interpreter not found on PATH. Python 3.11+ is required."
+fi
+
+"$VENV_PYTHON" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' \
+  || die "Detected $("$VENV_PYTHON" -V 2>&1). FSS requires Python 3.11+."
+ok "Python interpreter: $("$VENV_PYTHON" -V 2>&1) ($VENV_PYTHON)"
 
 # ------------------------------------------------------------------------------
-# 2. Java BlockStore & Bridge Compilation
+# 2. Editable Package & Import Check
 # ------------------------------------------------------------------------------
-echo "[2/4] Verifying Java BlockStore Bridge..."
-if [ ! -f "bridge/classes/bridge/JavaStoreBridge.class" ] || [ "${1:-}" = "--rebuild" ]; then
+echo "[2/5] Verifying Editable Package Installation (pip install -e .)..."
+if ! "$VENV_PYTHON" -c "import bridge; import fss_py" >/dev/null 2>&1; then
+  echo "  Package 'bridge' or 'fss_py' not found on Python path; installing in editable mode..."
+  "$VENV_PYTHON" -m pip install -e . || die "Failed to install package in editable mode via pip install -e ."
+fi
+"$VENV_PYTHON" -c "import bridge; import fss_py" || die "Failed to import bridge/fss_py after editable install check."
+ok "Editable package verified (import bridge, fss_py OK)"
+
+# ------------------------------------------------------------------------------
+# 3. Java BlockStore & Bridge Compilation Freshness
+# ------------------------------------------------------------------------------
+echo "[3/5] Verifying Java BlockStore Bridge Freshness..."
+TARGET_CLASS="bridge/classes/bridge/JavaStoreBridge.class"
+NEEDS_REBUILD=0
+
+if [ ! -f "$TARGET_CLASS" ] || [ "${1:-}" = "--rebuild" ]; then
+  NEEDS_REBUILD=1
+else
+  # Check if any .java source file is newer than TARGET_CLASS
+  NEWER_SRC="$(find fss-core/src/main/java bridge -maxdepth 2 -name "*.java" -newer "$TARGET_CLASS" 2>/dev/null | head -n 1 || true)"
+  if [ -n "$NEWER_SRC" ]; then
+    echo "  Detected newer Java source file: $NEWER_SRC; triggering recompilation..."
+    NEEDS_REBUILD=1
+  fi
+fi
+
+if [ "$NEEDS_REBUILD" -eq 1 ]; then
   echo "  Compiling JavaStoreBridge into bridge/classes..."
   bash bridge/compile.sh || die "Java bridge compilation failed."
 fi
-ok "Java BlockStore Bridge compiled and ready (bridge/classes/bridge/JavaStoreBridge.class)"
+ok "Java BlockStore Bridge compiled and up-to-date ($TARGET_CLASS)"
+
+# Confirm write permissions on BlockStore storage directory
+STORE_DIR="$ROOT_DIR/bridge"
+[ -d "$STORE_DIR" ] || mkdir -p "$STORE_DIR"
+TEST_WRITE_FILE="$STORE_DIR/.perm_check_$$"
+if touch "$TEST_WRITE_FILE" 2>/dev/null; then
+  rm -f "$TEST_WRITE_FILE"
+  ok "BlockStore storage directory ($STORE_DIR) is writable"
+else
+  die "BlockStore storage directory ($STORE_DIR) is not writable. Check filesystem permissions."
+fi
 
 # ------------------------------------------------------------------------------
-# 3. Model Resolution & Ollama Availability Check
+# 4. Model Resolution & Local LLM Context Probe
 # ------------------------------------------------------------------------------
-echo "[3/4] Checking Ollama & Synthesizer Model Resolution..."
+echo "[4/5] Checking Local LLM Server & Context Budget..."
 OLLAMA_STATUS="offline"
 if curl -sf -m 2 --noproxy "127.0.0.1,localhost" "$OLLAMA_URL/api/tags" >/dev/null 2>&1; then
   OLLAMA_STATUS="online"
   MODELS="$(curl -sf --noproxy "127.0.0.1,localhost" "$OLLAMA_URL/api/tags" | grep -o '"name":"[^"]*"' | cut -d'"' -f4 | tr '\n' ' ' || true)"
   ok "Ollama server running at $OLLAMA_URL (Models: ${MODELS:-none})"
+
+  # Probe active context size via /api/ps or ollama ps
+  PS_JSON="$(curl -sf -m 2 --noproxy "127.0.0.1,localhost" "$OLLAMA_URL/api/ps" 2>/dev/null || true)"
+  if [ -n "$PS_JSON" ] && command -v jq >/dev/null 2>&1; then
+    ACTIVE_CTX="$(echo "$PS_JSON" | jq -r '.models[0].context_length // empty' 2>/dev/null || true)"
+    if [ -n "$ACTIVE_CTX" ] && [ "$ACTIVE_CTX" -lt 16384 ]; then
+      warn "WARNING: Ollama active model context length is $ACTIVE_CTX (< 16384). FSS recommends num_ctx >= 16384 to prevent silent truncation."
+    fi
+  elif command -v ollama >/dev/null 2>&1; then
+    PS_OUTPUT="$(ollama ps 2>/dev/null || true)"
+    if echo "$PS_OUTPUT" | grep -qi "4096\|2048"; then
+      warn "WARNING: Ollama reports active context < 16384 tokens in 'ollama ps'. Set OLLAMA_CONTEXT_LENGTH=16384."
+    fi
+  fi
+elif curl -sf -m 2 --noproxy "127.0.0.1,localhost" "http://127.0.0.1:8080/health" >/dev/null 2>&1; then
+  ok "llama-server running at http://127.0.0.1:8080"
 else
-  warn "Ollama offline on $OLLAMA_URL — Synthesizer will automatically resolve to Local HF Qwen / Deterministic reasoning."
+  warn "Local LLM server offline — Synthesizer will automatically resolve to Local HF Qwen / Deterministic reasoning."
 fi
 
 # ------------------------------------------------------------------------------
-# 4. Streamlit Dashboard Launch & URLs
+# 5. Streamlit Dashboard Launch & URLs
 # ------------------------------------------------------------------------------
-echo "[4/4] Starting FSS Modernized 8-Part Streamlit Dashboard..."
+echo "[5/5] Preparing FSS Modernized 8-Part Streamlit Dashboard..."
 
-if curl -sf -m 1 --noproxy "127.0.0.1,localhost" "$URL/_stcore/health" >/dev/null 2>&1; then
+if curl -sf -m 1 --noproxy "127.0.0.1,localhost" "$HEALTH_URL/_stcore/health" >/dev/null 2>&1; then
   echo
   ok "FSS Dashboard is already running at $URL (code reload active)"
   command -v xdg-open >/dev/null 2>&1 && xdg-open "$URL" >/dev/null 2>&1 || true
@@ -112,7 +260,7 @@ echo "  Qwen RAG Synthesizer:  3-Tier Resolution (Ollama: $OLLAMA_STATUS | HF | 
 echo "  Citation Validator:    Active (16 FSS Hard Rules, Hallucination Gate)"
 echo "================================================================================"
 echo "  Quick Test Commands (in another terminal):"
-echo "    - Syntax & import check:  python3 -c \"import streamlit_app; print('Imports OK')\""
+echo "    - 10-Suite Pytest:        pytest tests/"
 echo "    - Bridge unit tests:      python3 bridge/test_bridge.py"
 echo "    - End-to-end pipeline:    ./run_pipeline.sh --scenario scenario_298_474"
 echo "================================================================================"
@@ -122,15 +270,15 @@ echo
 # Background browser auto-opener
 ( for _ in $(seq 30); do
     sleep 1
-    if curl -sf -m 1 --noproxy "127.0.0.1,localhost" "$URL/_stcore/health" >/dev/null 2>&1; then
+    if curl -sf -m 1 --noproxy "127.0.0.1,localhost" "$HEALTH_URL/_stcore/health" >/dev/null 2>&1; then
       command -v xdg-open >/dev/null 2>&1 && xdg-open "$URL" >/dev/null 2>&1 || true
       break
     fi
   done ) &
 
-exec "$PYTHON" -m streamlit run streamlit_app.py \
+PYTHONUNBUFFERED=1 XLA_PYTHON_CLIENT_PREALLOCATE=false exec "$VENV_PYTHON" -m streamlit run app.py \
   --global.developmentMode false \
-  --server.address 127.0.0.1 \
+  --server.address "$SERVER_ADDRESS" \
   --server.port "$PORT" \
   --server.headless true \
   --browser.gatherUsageStats false
