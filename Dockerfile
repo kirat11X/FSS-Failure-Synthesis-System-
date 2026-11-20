@@ -2,13 +2,13 @@
 # Failure Synthesis System (FSS) — Multi-Runtime Dockerfile
 #
 # Provides:
-#   - OpenJDK 21 (Eclipse Temurin on Debian Bookworm)
+#   - OpenJDK 21 (Eclipse Temurin)
 #   - Python 3.11+ Virtual Environment
 #   - Pre-compiled Java BlockStore & AF_UNIX Bridge
 #   - Modernized 8-Part Streamlit Failure Synthesis Dashboard
 # ==============================================================================
 
-FROM eclipse-temurin:21-jdk-bookworm AS base
+FROM eclipse-temurin:21-jdk AS base
 
 # Prevent interactive prompts during apt operations
 ENV DEBIAN_FRONTEND=noninteractive \
