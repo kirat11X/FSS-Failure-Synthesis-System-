@@ -1,20 +1,20 @@
 """Streamlit Modernized Front End for Failure Synthesis System (FSS).
 
-1980s Cyberpunk / Synthwave Mission-Control Edition.
+Minimalist Research-Grade CRT Diagnostics Terminal Edition.
 Integrates:
   - Java BlockStore bounded & whole-dataset retrieval via JavaStoreBridge & JavaRetriever
   - Thread-Safe Resource Caching with ThreadSafeWrapper & st.cache_resource
   - Deterministic SHA-256 upload caching via BinCacheManager
   - Smart whole-dataset telemetry condensation (condense_telemetry)
   - Vendor Error Manual RAG ingestion (load_builtin_manual, parse_error_manual, VendorErrorEntry)
-  - Epistemic Citation Validator supporting 5 Validation Badges:
-      * VERIFIED_SUPPORTED (Phosphor Acid Green)
-      * FORCE_OVERCLAIM (Retro Amber)
-      * ENTITY_MISMATCH (Neon Orange)
-      * UNGROUNDED_HALLUCINATION (Crimson Neon)
-      * INSUFFICIENT_EVIDENCE (Electric Cyan / Muted Slate)
+  - Epistemic Citation Validator supporting 5 Functional Phosphor Validation Badges:
+      * VERIFIED_SUPPORTED (Phosphor Green)
+      * FORCE_OVERCLAIM (Phosphor Amber)
+      * ENTITY_MISMATCH (Phosphor Red)
+      * UNGROUNDED_HALLUCINATION (Phosphor Red)
+      * INSUFFICIENT_EVIDENCE (Phosphor Cyan)
   - Clean top-of-page investigation query bar with submit-on-Enter & dynamic telemetry chips
-  - Dedicated Vendor Error Manual Inspector Tab
+  - Dedicated Matched Vendor Error Codes Inspector Tab
   - Lossless stringified uint64 timestamps preserving nanoseconds
 """
 
@@ -72,6 +72,17 @@ from bridge.hybrid_rag import (
     enrich_evidence_with_manual,
 )
 from bridge.java_retriever import JavaRetriever
+# Prevent CPU-only HuggingFace hangs in Streamlit interactive sessions when CUDA is absent or in tests
+try:
+    if "PYTEST_CURRENT_TEST" in os.environ or "FORCE_LOCAL_HF" not in os.environ:
+        import bridge.synthesizer
+        bridge.synthesizer.LOCAL_HF_PATH = ""
+        os.environ["LOCAL_HF_PATH"] = ""
+        os.environ["LOCAL_MODEL_PATH"] = ""
+        os.environ["QWEN_MODEL_SNAPSHOT"] = ""
+except Exception:
+    pass
+
 from bridge.synthesizer import (
     DOMAIN_KNOWLEDGE,
     LOCAL_HF_PATH,
@@ -88,7 +99,7 @@ GOLDEN_DIR = ROOT / "fixtures" / "golden"
 BRIDGE_DIR = ROOT / "bridge"
 IRL_DIR = ROOT / "test_data" / "irl"
 UNSEEN_DIR = ROOT / "test_data" / "unseen"
-CSS_PATH = ROOT / "assets" / "cyberpunk80s.css"
+CSS_PATH = ROOT / "assets" / "research_crt.css"
 STORAGE_PROPERTIES = ROOT / "fss-core" / "storage.properties"
 MAX_WINDOW_NS = 3600 * 10**9  # 1 hour max retrieval window contract
 
@@ -433,7 +444,7 @@ def compute_epistemic_badge(
     evidence: dict[str, Any],
     synthesis: dict[str, Any],
 ) -> tuple[str, str, str, str]:
-    """Map verification results to 1 of 5 epistemic Validation Badges in Cyberpunk styling.
+    """Map verification results to 1 of 5 epistemic Validation Badges in Minimalist Research CRT styling.
 
     Returns:
         (badge_name, css_class, title, description)
@@ -592,18 +603,18 @@ def generate_dynamic_query_chips(
 
 def main() -> None:
     st.set_page_config(
-        page_title="Failure Synthesis System (FSS)",
-        page_icon="🛸",
+        page_title="Failure Synthesis System (FSS) — Telemetry Diagnostics Terminal",
+        page_icon="📟",
         layout="wide",
         initial_sidebar_state="expanded",
     )
 
-    # Inject Cyberpunk 1980s Synthwave Theme
+    # Inject Minimalist Research-Grade CRT Interface Theme
     if CSS_PATH.exists():
         st.markdown(f"<style>{CSS_PATH.read_text(encoding='utf-8')}</style>", unsafe_allow_html=True)
 
-    st.title("🛸 Failure Synthesis System (FSS)")
-    st.caption("1980s Synthwave Edition • Java 64KB BlockStore ⟷ Contract v0 Wire ⟷ Qwen RAG Synthesizer ⟷ Epistemic Citation Validator")
+    st.title("Failure Synthesis System (FSS) — Telemetry Diagnostics Terminal")
+    st.caption("Laboratory CRT Instrument • Java 64KB BlockStore ⟷ Contract v0 Wire ⟷ Qwen RAG Synthesizer ⟷ Epistemic Citation Validator")
 
     cache_mgr = get_bin_cache_manager()
 
@@ -786,18 +797,17 @@ def main() -> None:
         span_s = 5
         duration_display = "5.0s"
 
-    # Display compact "INGESTED & CACHED" neon badge in sidebar
+    # Display compact single-line status indicator using BinCacheManager
     with st.sidebar:
-        cache_label = "⚡ INGESTED & CACHED" if was_cached else "⚡ INGESTION COMPLETE"
-        hash_short = f"SHA: {file_sha256[:8]}" if file_sha256 else "LIVE"
+        cache_status_text = "CACHED" if was_cached else "INGESTED"
+        fmt_label = detected_fmt.replace(" DATAFLASH", "").replace(" WIRE", "").strip()
+        status_line = f"{cache_status_text} · {fmt_label} · {len(sample_envelopes)} EVENTS · {duration_display}"
+        dot_class = "crt-status-dot" if was_cached else "crt-status-dot amber"
         st.markdown(
             f"""
-            <div class="neon-badge-pill {'cached' if was_cached else ''}" style="margin-top: 6px; margin-bottom: 12px; width: 100%; justify-content: center;">
-                <span>{cache_label}</span> •
-                <span>{detected_fmt}</span> •
-                <span>{len(sample_envelopes)} EV</span> •
-                <span>{duration_display}</span> •
-                <code>{hash_short}</code>
+            <div class="crt-status-indicator">
+                <span class="{dot_class}"></span>
+                <span>{status_line}</span>
             </div>
             """,
             unsafe_allow_html=True,
@@ -813,7 +823,7 @@ def main() -> None:
         manual_profile = st.selectbox(
             "Error Manual Profile",
             [
-                "Auto-Detect (Recommended)",
+                "Auto-Matched Profile (Recommended)",
                 "ArduPilot Flight DataFlash",
                 "PX4 Autopilot uORB",
                 "FSS Native Telemetry",
@@ -825,8 +835,8 @@ def main() -> None:
         )
 
         custom_manual_file = st.file_uploader(
-            "Upload Custom Manual (.md, .json, .csv, .txt)",
-            type=["md", "json", "csv", "txt"],
+            "Upload Custom Manual (.txt, .md, .json, .csv)",
+            type=["txt", "md", "json", "csv"],
             help="Upload vendor fault code specifications to dynamically index into Hybrid RAG.",
         )
 
@@ -843,7 +853,7 @@ def main() -> None:
 
         # 2. Built-in profile
         if manual_profile != "Custom File Upload Only":
-            if manual_profile == "Auto-Detect (Recommended)":
+            if manual_profile == "Auto-Matched Profile (Recommended)":
                 if vendor_hint == "ardupilot":
                     active_vendor_entries.extend(load_builtin_manual("ardupilot"))
                     vendor_label = "ArduPilot (Auto-Matched)"
@@ -875,9 +885,9 @@ def main() -> None:
 
         st.markdown(
             f"""
-            <div class="neon-badge-pill" style="margin-top: 4px; margin-bottom: 12px; width: 100%; justify-content: center;">
-                <span>⚡ {len(active_vendor_entries)} ERROR SPECS DIGESTED</span> •
-                <span>{vendor_label}</span>
+            <div class="crt-status-indicator">
+                <span class="crt-status-dot cyan"></span>
+                <span>{len(active_vendor_entries)} ERROR CODES DIGESTED · {vendor_label}</span>
             </div>
             """,
             unsafe_allow_html=True,
@@ -894,7 +904,7 @@ def main() -> None:
         analysis_scope = st.radio(
             "Scope Mode",
             [
-                "Full Dataset (Entire .bin) [Default]",
+                "Full Dataset (Entire .bin)",
                 "Manual Interval Bounds",
             ],
             index=0,
@@ -902,7 +912,7 @@ def main() -> None:
         )
 
         # Advanced Time-Window Slicing
-        with st.expander("⚙️ Advanced: Time-Window Slicing", expanded=(analysis_scope == "Manual Interval Bounds")):
+        with st.expander("Advanced: Manual Time Bounds", expanded=False):
             st.caption(f"Log timestamps: `{fmt_ns(t_min)}` → `{fmt_ns(t_max)}` UTC")
             offset = st.slider("Offset (seconds from start)", 0, max(0, span_s - 1), 0) if span_s > 1 else 0
             max_duration = min(3600, max(1, span_s - offset + 5))
@@ -915,7 +925,7 @@ def main() -> None:
             t_start_ns = t_min + offset * 10**9
             t_end_ns = min(t_start_ns + duration * 10**9, t_start_ns + MAX_WINDOW_NS)
 
-        source_arg = ALL if (analysis_scope != "Manual Interval Bounds" or source_selection == "ALL") else int(source_selection)
+        source_arg = ALL if source_selection == "ALL" else int(source_selection)
 
         st.divider()
         st.markdown("### 🤖 Model Tier")
@@ -934,13 +944,13 @@ def main() -> None:
     # MAIN AREA: Clean Top-of-Page Operator Query Layout
     # =========================================================================
 
-    # Mission-Control Header
+    # CRT Instrument Header
     st.markdown(
         """
-        <div style="border-bottom: 1px solid rgba(0, 245, 255, 0.3); padding-bottom: 8px; margin-bottom: 16px;">
+        <div style="border-bottom: 1px solid #1F2B27; padding-bottom: 8px; margin-bottom: 16px;">
             <div style="display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 8px;">
-                <h1 style="margin: 0; font-size: 1.8rem; letter-spacing: 2px;">🛸 FAILURE SYNTHESIS SYSTEM // MISSION CONTROL</h1>
-                <div class="hud-kpi-meta" style="font-size: 0.82rem;">1980s SYNTHWAVE EDITION • REAL-TIME EPIDEMIOLOGY & TELEMETRY RAG</div>
+                <h2 style="margin: 0; font-size: 1.35rem; letter-spacing: 1px; color: #FFFFFF;">FAILURE SYNTHESIS SYSTEM // TELEMETRY DIAGNOSTICS TERMINAL</h2>
+                <div class="hud-kpi-meta" style="font-size: 0.78rem; color: #5CE1E6;">LABORATORY CRT INSTRUMENT • JAVA 64KB BLOCKSTORE • QWEN RAG</div>
             </div>
         </div>
         """,
@@ -953,8 +963,8 @@ def main() -> None:
     detected_codes = extract_error_codes_from_events(initial_decoded)
     dynamic_chips = generate_dynamic_query_chips(initial_decoded or sample_envelopes, detected_codes, all_sources)
 
-    # Investigation Query Input Bar with Primary Action Button & submit-on-Enter
-    st.subheader("1. Operator Investigation Query")
+    # Minimal Investigation Query Input Bar with Crisp "Analyze Log" Button (submit-on-Enter)
+    st.subheader("Investigation Query")
     if "operator_query" not in st.session_state:
         st.session_state["operator_query"] = dynamic_chips[0] if dynamic_chips else "Diagnose all detected errors using loaded error manual"
 
@@ -962,30 +972,31 @@ def main() -> None:
         col_q, col_btn = st.columns([5, 2])
         with col_q:
             query_input = st.text_input(
-                "INVESTIGATION QUERY",
+                "Investigation Query",
                 value=st.session_state["operator_query"],
                 label_visibility="collapsed",
                 placeholder="Enter investigation question (e.g. Diagnose all detected errors using loaded error manual)...",
             )
         with col_btn:
-            submitted = st.form_submit_button("⚡ ANALYZE FULL TELEMETRY", use_container_width=True)
+            submitted = st.form_submit_button("⚡ Analyze Log", use_container_width=True)
 
     if submitted:
         st.session_state["operator_query"] = query_input
 
     query = st.session_state["operator_query"]
 
-    # Subtle Dynamic Query Chips beneath input bar
-    if dynamic_chips:
-        st.markdown('<div style="font-size: 0.76rem; color: #8FA0C0; margin-top: -8px; margin-bottom: 4px; letter-spacing: 1px;">QUICK TELEMETRY PROBES (AUTO-DETECTED):</div>', unsafe_allow_html=True)
-        chip_cols = st.columns(len(dynamic_chips[:4]))
-        for col, chip_text in zip(chip_cols, dynamic_chips[:4]):
+    # Subtle Dynamic Query Chips beneath input bar (2-3 chips strictly from active dataset)
+    chips_to_show = dynamic_chips[:3]
+    if chips_to_show:
+        st.markdown('<div style="font-size: 0.76rem; color: #8E9E99; margin-top: -6px; margin-bottom: 6px; letter-spacing: 0.5px; font-family: monospace;">QUICK ANOMALY PROBES:</div>', unsafe_allow_html=True)
+        chip_cols = st.columns(len(chips_to_show))
+        for col, chip_text in zip(chip_cols, chips_to_show):
             with col:
-                if st.button(f"🔎 {chip_text}", key=f"chip_{hash(chip_text)}", use_container_width=True):
+                if st.button(f"🔍 {chip_text}", key=f"chip_{hash(chip_text)}", use_container_width=True):
                     st.session_state["operator_query"] = chip_text
                     st.rerun()
 
-    st.markdown("<div style='margin-bottom: 12px;'></div>", unsafe_allow_html=True)
+    st.markdown("<div style='margin-bottom: 14px;'></div>", unsafe_allow_html=True)
 
     # =========================================================================
     # RETRIEVAL EXECUTION: Full Dataset vs Bounded Slicing
@@ -996,7 +1007,7 @@ def main() -> None:
     with st.spinner("Executing Java BlockStore retrieval & telemetry condensation..."):
         try:
             with retriever_wrapper as retriever:
-                if analysis_scope == "Full Dataset (Entire .bin) [Default]":
+                if analysis_scope.startswith("Full"):
                     # Whole dataset retrieval
                     envelope = retriever.retrieve_full_dataset(source=source_arg, max_events=10000)
                     wire_records = [ev.to_event_record() if hasattr(ev, "to_event_record") else ev for ev in envelope.events]
@@ -1126,9 +1137,9 @@ def main() -> None:
     with m_col2:
         st.metric("Events Analyzed", f"{len(condensed_events)}")
     with m_col3:
-        st.metric("Coverage Mode", coverage_mode)
+        st.metric("Coverage", coverage_mode)
     with m_col4:
-        st.metric("Storage Engine", "Java BlockStore (64KB)")
+        st.metric("Storage Engine", "Java BlockStore")
     with m_col5:
         st.metric("Model Tier", model_disp)
 
@@ -1141,19 +1152,19 @@ def main() -> None:
                 <div class="hud-kpi-meta">{len(retrieval_res.events)} raw retrieved</div>
             </div>
             <div class="hud-kpi-card">
-                <div class="hud-kpi-label">COVERAGE MODE</div>
-                <div class="hud-kpi-value" style="font-size: 1.05rem;">{coverage_mode}</div>
+                <div class="hud-kpi-label">COVERAGE</div>
+                <div class="hud-kpi-value">{coverage_mode}</div>
                 <div class="hud-kpi-meta">{'Truncated: YES' if retrieval_res.truncated else 'Complete Span'}</div>
             </div>
             <div class="hud-kpi-card">
-                <div class="hud-kpi-label">VENDOR MANUAL</div>
-                <div class="hud-kpi-value" style="font-size: 1.05rem;">{vendor_disp}</div>
+                <div class="hud-kpi-label">ERROR MANUAL</div>
+                <div class="hud-kpi-value">{vendor_disp}</div>
                 <div class="hud-kpi-meta">{len(vendor_manual_matches)} faults matched</div>
             </div>
             <div class="hud-kpi-card">
                 <div class="hud-kpi-label">STORAGE ENGINE</div>
-                <div class="hud-kpi-value" style="font-size: 1.05rem;">JAVA 64KB</div>
-                <div class="hud-kpi-meta">CRC-32C Verified</div>
+                <div class="hud-kpi-value">Java BlockStore</div>
+                <div class="hud-kpi-meta">64KB · CRC-32C Verified</div>
             </div>
             <div class="hud-kpi-card">
                 <div class="hud-kpi-label">MODEL TIER</div>
@@ -1197,7 +1208,7 @@ def main() -> None:
     with st.container():
         st.markdown(
             f"""
-            <div style="background-color: var(--bg-card); border: 1px solid var(--border-cyan); border-radius: 4px; padding: 18px 22px; margin-bottom: 20px;">
+            <div style="background-color: var(--bg-container); border: 1px solid var(--border-crisp); border-radius: var(--radius-sharp); padding: 18px 22px; margin-bottom: 20px;">
                 <h3 style="margin-top: 0; font-size: 1.25rem;">🔬 Part 7: Grounded Failure Synthesis ({conf_color} {confidence.upper()} Confidence)</h3>
             """,
             unsafe_allow_html=True,
@@ -1254,14 +1265,14 @@ def main() -> None:
         st.markdown("</div>", unsafe_allow_html=True)
 
     # =========================================================================
-    # INTERACTIVE INSPECTION TABS (Including Tab 4: Vendor Error Manual)
+    # INTERACTIVE INSPECTION TABS (Including Tab 4: Matched Vendor Error Codes)
     # =========================================================================
     tab_timeline, tab_gaps, tab_rag, tab_manual, tab_prompt, tab_audit, tab_raw = st.tabs(
         [
             "📑 Tab 1: Timeline & Epistemic Tags",
             "🛡️ Tab 2: Data Gaps Quarantine",
             "📚 Tab 3: Domain Knowledge RAG",
-            "📖 Tab 4: Vendor Error Manual",
+            "📖 Tab 4: Matched Vendor Error Codes",
             "🔍 Tab 5: Prompt Context",
             "⚖️ Tab 6: Citation Validation Audit",
             "💾 Tab 7: Raw Evidence JSON",
@@ -1329,9 +1340,9 @@ def main() -> None:
                 st.markdown(f"**Domain:** `{chunk['domain']}` | **Kind:** `{chunk['kind']}`")
                 st.markdown(f"> {chunk['content']}")
 
-    # Tab 4: Vendor Error Manual (Dedicated Inspector Tab)
+    # Tab 4: Matched Vendor Error Codes (Dedicated Inspector Tab)
     with tab_manual:
-        st.markdown(f"### 📖 Vendor Error-Code Manual Inspector ({len(active_vendor_entries)} Specs Loaded)")
+        st.markdown(f"### 📖 Matched Vendor Error Codes & Catalog ({len(active_vendor_entries)} Specs Loaded)")
 
         # Section A: Telemetry Matched Error Codes
         st.markdown("#### 🎯 Error Codes Matched in Loaded Telemetry Log")

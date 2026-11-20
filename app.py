@@ -26,6 +26,17 @@ os.environ["no_proxy"] = "127.0.0.1,localhost"
 sys.modules.setdefault("google._upb._message", None)
 sys.modules.setdefault("google.protobuf.pyext._message", None)
 
+# Prevent CPU-only HuggingFace hangs in Streamlit interactive sessions when CUDA is absent or in tests
+try:
+    if "PYTEST_CURRENT_TEST" in os.environ or "FORCE_LOCAL_HF" not in os.environ:
+        import bridge.synthesizer
+        bridge.synthesizer.LOCAL_HF_PATH = ""
+        os.environ["LOCAL_HF_PATH"] = ""
+        os.environ["LOCAL_MODEL_PATH"] = ""
+        os.environ["QWEN_MODEL_SNAPSHOT"] = ""
+except Exception:
+    pass
+
 from streamlit_app import main
 
 if __name__ == "__main__":

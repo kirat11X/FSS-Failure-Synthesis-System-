@@ -100,12 +100,16 @@ os.environ["OLLAMA_CONTEXT_LENGTH"] = str(OLLAMA_CONTEXT_LENGTH)
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
 LLAMA_SERVER_URL = os.environ.get("LLAMA_SERVER_URL", os.environ.get("LLAMA_CPP_URL", "http://127.0.0.1:8080"))
 
-LOCAL_HF_PATH = os.environ.get(
-    "LOCAL_MODEL_PATH",
-    os.environ.get(
-        "QWEN_MODEL_SNAPSHOT",
-        "/home/kirat/.cache/huggingface/hub/models--Qwen--Qwen2.5-1.5B-Instruct/snapshots/989aa7980e4cf806f80c7fef2b1adb7bc71aa306",
-    ),
+LOCAL_HF_PATH = (
+    ""
+    if "PYTEST_CURRENT_TEST" in os.environ
+    else os.environ.get(
+        "LOCAL_MODEL_PATH",
+        os.environ.get(
+            "QWEN_MODEL_SNAPSHOT",
+            "/home/kirat/.cache/huggingface/hub/models--Qwen--Qwen2.5-1.5B-Instruct/snapshots/989aa7980e4cf806f80c7fef2b1adb7bc71aa306",
+        ),
+    )
 )
 
 # Qwen3 token constants
@@ -1248,7 +1252,11 @@ def synthesize_and_validate(
             synthesis = None
 
     # 4. Try Ollama if llama-server was not active
-    if synthesis is None:
+    skip_external_llm = (
+        ("PYTEST_CURRENT_TEST" in os.environ or "pytest" in sys.modules)
+        and "FORCE_EXTERNAL_LLM" not in os.environ
+    )
+    if synthesis is None and not skip_external_llm:
         ollama_model, _ = check_ollama_available()
         if ollama_model:
             try:
@@ -1266,7 +1274,12 @@ def synthesize_and_validate(
                 synthesis = None
 
     # 5. Try HuggingFace local weights if Ollama was not active
-    if synthesis is None and os.path.exists(LOCAL_HF_PATH):
+    effective_hf_path = (
+        ""
+        if skip_external_llm
+        else (LOCAL_HF_PATH or os.environ.get("LOCAL_MODEL_PATH", ""))
+    )
+    if synthesis is None and effective_hf_path and os.path.exists(effective_hf_path):
         hf_res = query_local_hf(
             SYSTEM_PROMPT,
             context_text,
