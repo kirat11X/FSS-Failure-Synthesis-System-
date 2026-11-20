@@ -180,6 +180,24 @@ def _extract_queried_entities(query: str) -> set[int]:
     return entities
 
 
+def _event_to_dict(ev: Any) -> dict[str, Any]:
+    if isinstance(ev, dict):
+        d = dict(ev)
+    elif hasattr(ev, "model_dump"):
+        d = ev.model_dump()
+    elif hasattr(ev, "to_dict"):
+        d = ev.to_dict()
+    elif hasattr(ev, "__dict__"):
+        d = dict(vars(ev))
+    else:
+        d = {}
+    if "timestamp" in d and "timestamp_ns" not in d:
+        d["timestamp_ns"] = d["timestamp"]
+    if "source" in d and "source_id" not in d:
+        d["source_id"] = d["source"]
+    return d
+
+
 def _check_deterministic_gate(evidence: dict[str, Any], query: str) -> tuple[bool, str, dict[str, Any]]:
     """Deterministic short-circuit gate.
 
@@ -248,8 +266,10 @@ def _check_deterministic_gate(evidence: dict[str, Any], query: str) -> tuple[boo
     if len(events) >= 2:
         by_source: dict[int, list[int]] = {}
         for ev in events:
-            src = ev.get("source_id", 0)
-            ts = ev.get("timestamp_ns") or ev.get("timestamp") or 0
+            raw_src = ev.get("source_id", 0)
+            src = int(raw_src) if str(raw_src).isdigit() else raw_src
+            raw_ts = ev.get("timestamp_ns") or ev.get("timestamp") or 0
+            ts = int(raw_ts) if str(raw_ts).isdigit() else 0
             by_source.setdefault(src, []).append(ts)
         for src, ts_list in by_source.items():
             ts_list.sort()
@@ -342,7 +362,7 @@ def _check_candidate_spans(
 
     # 1. Telemetry events inspection
     for ev in events:
-        ename = (ev.get("event_name") or ev.get("event_type") or "").upper()
+        ename = str(ev.get("event_name") or ev.get("event_type") or "").upper()
         eid = ev.get("event_id", "ev-unknown")
         src = ev.get("source_id", "src-unknown")
 
@@ -499,6 +519,10 @@ def evaluate_sufficiency(
 
     Gates synthesis before invoking LLM. Returns SufficiencyResult.
     """
+    # Normalize evidence events to dicts
+    if evidence and "events" in evidence:
+        evidence = {**evidence, "events": [_event_to_dict(e) for e in evidence.get("events", [])]}
+
     # Normalize vendor manual matches
     all_vendor_matches: list[dict[str, Any]] = []
     if vendor_manual_matches:

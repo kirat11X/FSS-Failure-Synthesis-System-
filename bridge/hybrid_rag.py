@@ -618,17 +618,22 @@ class HistoricalIncidentsStore:
 # ---------------------------------------------------------------------------
 
 def enrich_evidence_with_manual(
-    evidence: dict[str, Any],
+    evidence: dict[str, Any] | list[Any],
     catalog: list[VendorErrorEntry],
 ) -> list[dict[str, Any]]:
-    """Extract error codes from evidence['events'], match against catalog, and return enriched fault descriptions.
+    """Extract error codes from evidence['events'] (or evidence list), match against catalog, and return enriched fault descriptions.
 
     Ready to be injected into prompt context.
     """
     if not evidence or not catalog:
         return []
 
-    events = evidence.get("events", [])
+    if isinstance(evidence, list):
+        events = evidence
+    elif isinstance(evidence, dict):
+        events = evidence.get("events", [])
+    else:
+        events = []
     extracted_codes = extract_error_codes_from_events(events)
     norm_codes = {c.strip().lower() for c in extracted_codes if c.strip()}
 
