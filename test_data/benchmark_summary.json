@@ -8,7 +8,7 @@
     "status": "OK",
     "validation_badge": "VERIFIED_SUPPORTED",
     "backend": "Offline deterministic reasoning",
-    "latency_ms": 19214.4,
+    "latency_ms": 62639.65,
     "notes": "0 valid citations"
   },
   {
@@ -20,7 +20,7 @@
     "status": "OK",
     "validation_badge": "VERIFIED_SUPPORTED",
     "backend": "Offline deterministic reasoning",
-    "latency_ms": 5139.0,
+    "latency_ms": 40774.98,
     "notes": "0 valid citations"
   },
   {
@@ -32,7 +32,7 @@
     "status": "OK",
     "validation_badge": "VERIFIED_SUPPORTED",
     "backend": "Offline deterministic reasoning",
-    "latency_ms": 9267.6,
+    "latency_ms": 46357.63,
     "notes": "0 valid citations"
   },
   {
@@ -40,12 +40,12 @@
     "category": "IRL",
     "file_size_bytes": 162824,
     "events_ingested": 5000,
-    "events_retrieved": 150,
-    "status": "OK",
-    "validation_badge": "VERIFIED_SUPPORTED",
-    "backend": "Offline deterministic reasoning",
-    "latency_ms": 14150.68,
-    "notes": "0 valid citations"
+    "events_retrieved": 0,
+    "status": "FAIL",
+    "validation_badge": "UNKNOWN",
+    "backend": "",
+    "latency_ms": 24014.22,
+    "notes": "time window 270454530400000000 ns exceeds MAX_WINDOW_NS=3600000000000"
   },
   {
     "filename": "sample_clean.fss.bin",
@@ -56,7 +56,7 @@
     "status": "OK",
     "validation_badge": "VERIFIED_SUPPORTED",
     "backend": "Offline deterministic reasoning",
-    "latency_ms": 4648.01,
+    "latency_ms": 47621.23,
     "notes": "0 valid citations"
   },
   {
@@ -68,7 +68,7 @@
     "status": "OK",
     "validation_badge": "VERIFIED_SUPPORTED",
     "backend": "Offline deterministic reasoning",
-    "latency_ms": 4878.29,
+    "latency_ms": 39544.92,
     "notes": "0 valid citations"
   },
   {
@@ -80,7 +80,7 @@
     "status": "OK",
     "validation_badge": "VERIFIED_SUPPORTED",
     "backend": "Offline deterministic reasoning",
-    "latency_ms": 1370.06,
+    "latency_ms": 34223.05,
     "notes": "0 valid citations"
   },
   {
@@ -92,20 +92,20 @@
     "status": "OK",
     "validation_badge": "VERIFIED_SUPPORTED",
     "backend": "Offline deterministic reasoning",
-    "latency_ms": 1302.65,
+    "latency_ms": 33765.52,
     "notes": "1 valid citations"
   },
   {
     "filename": "unseen_03_uint64_burst_multi_block.bin",
     "category": "Unseen",
     "file_size_bytes": 216000,
-    "events_ingested": 6000,
-    "events_retrieved": 150,
-    "status": "OK",
-    "validation_badge": "VERIFIED_SUPPORTED",
-    "backend": "Offline deterministic reasoning",
-    "latency_ms": 15732.59,
-    "notes": "0 valid citations"
+    "events_ingested": 0,
+    "events_retrieved": 0,
+    "status": "FAIL",
+    "validation_badge": "UNKNOWN",
+    "backend": "",
+    "latency_ms": 30291.73,
+    "notes": "Process 40763 timed out after 30.0s: /usr/lib/jvm/java-25-openjdk/bin/java -Dfil"
   },
   {
     "filename": "unseen_04_multi_agent_entity_swap.bin",
@@ -116,7 +116,7 @@
     "status": "OK",
     "validation_badge": "VERIFIED_SUPPORTED",
     "backend": "Offline deterministic reasoning",
-    "latency_ms": 2728.22,
+    "latency_ms": 36050.92,
     "notes": "0 valid citations"
   },
   {
@@ -128,7 +128,7 @@
     "status": "OK",
     "validation_badge": "VERIFIED_SUPPORTED",
     "backend": "Offline deterministic reasoning",
-    "latency_ms": 5141.13,
+    "latency_ms": 35617.78,
     "notes": "0 valid citations"
   },
   {
@@ -140,7 +140,7 @@
     "status": "OK",
     "validation_badge": "VERIFIED_SUPPORTED",
     "backend": "Offline deterministic reasoning",
-    "latency_ms": 12811.77,
+    "latency_ms": 34065.02,
     "notes": "0 valid citations"
   }
 ]

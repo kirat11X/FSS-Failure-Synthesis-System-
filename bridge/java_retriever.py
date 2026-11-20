@@ -156,8 +156,26 @@ def send_worker_request(
         sock.close()
 
 
-def resolve_and_convert_fixtures(fixture_paths: tuple[str | Path, ...], root: Path) -> list[str]:
-    """Resolve fixture paths and auto-convert raw ArduPilot DataFlash logs (0xA3 0x95) to .fss.bin."""
+def convert_contract_v0_to_fss_bin(src_path: Path, dest_path: Path) -> None:
+    """Convert a Contract v0 wire binary file (<HBBIQII) to envelope.cfg Big-Endian format (>IQII)."""
+    from fss_py.wire import iter_envelopes
+    data = src_path.read_bytes()
+    records = list(iter_envelopes(data))
+    HEADER = struct.Struct(">IQII")
+    out = bytearray()
+    for r in records:
+        out.extend(HEADER.pack(r.source_id, r.timestamp_ns, len(r.payload_bytes), r.event_type))
+        out.extend(r.payload_bytes)
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    dest_path.write_bytes(out)
+
+
+def resolve_and_convert_fixtures(
+    fixture_paths: tuple[str | Path, ...],
+    root: Path,
+    for_storage_ipc: bool = False,
+) -> list[str]:
+    """Resolve fixture paths and auto-convert raw ArduPilot DataFlash logs (0xA3 0x95) or Contract v0 (for storage_ipc) to .fss.bin."""
     resolved = []
     for p in fixture_paths:
         fp = Path(p)
@@ -169,7 +187,15 @@ def resolve_and_convert_fixtures(fixture_paths: tuple[str | Path, ...], root: Pa
                 if len(head2) == 2 and head2[0] == 0xA3 and head2[1] == 0x95:
                     from scripts.convert_ardupilot_bin_to_fss import convert_log
                     out_fss = resolved_fp.with_suffix(".fss.bin")
-                    convert_log(resolved_fp, out_fss)
+                    if not out_fss.exists():
+                        convert_log(resolved_fp, out_fss)
+                    resolved.append(str(out_fss))
+                    continue
+                if for_storage_ipc and len(head2) == 2 and head2[0] == 0x53 and head2[1] == 0x46:
+                    conv_dir = Path("/tmp/fss_converted")
+                    conv_dir.mkdir(parents=True, exist_ok=True)
+                    out_fss = conv_dir / f"{resolved_fp.stem}.fss.bin"
+                    convert_contract_v0_to_fss_bin(resolved_fp, out_fss)
                     resolved.append(str(out_fss))
                     continue
             except Exception:
@@ -324,7 +350,7 @@ class JavaRetriever:
     def ingest(self, *fixture_paths: str | Path, trace_id: str | None = None) -> None:
         """Ingest wire envelope (.bin) fixtures into this retriever's BlockStore with write locking."""
         tid = bind_trace_id(trace_id)
-        resolved_fixtures = resolve_and_convert_fixtures(fixture_paths, self.root)
+        resolved_fixtures = resolve_and_convert_fixtures(fixture_paths, self.root, for_storage_ipc=(self.mode == "storage_ipc"))
 
         # If in storage_ipc mode, ingest directly using Ingestion.FileIngestor
         if self.mode == "storage_ipc":
@@ -408,7 +434,7 @@ class JavaRetriever:
 
     def ingest_clean(self, *fixture_paths: str | Path, trace_id: str | None = None) -> None:
         """Clean storage directory and ingest wire envelope fixtures."""
-        resolved_fixtures = resolve_and_convert_fixtures(fixture_paths, self.root)
+        resolved_fixtures = resolve_and_convert_fixtures(fixture_paths, self.root, for_storage_ipc=(self.mode == "storage_ipc"))
         if self.mode == "storage_ipc":
             if self.storage_properties is None or not self.storage_properties.exists():
                 raise FileNotFoundError(f"Storage properties file not found: {self.storage_properties}")
@@ -493,29 +519,30 @@ class JavaRetriever:
         )
 
         try:
-            req_bytes = json.dumps(req).encode("utf-8")
-            if proc.stdin is None or proc.stdout is None:
-                raise RuntimeError("Failed to open stdio pipes to RetrievalMain")
+            def _query_ipc(req_data: dict[str, Any]) -> dict[str, Any]:
+                req_b = json.dumps(req_data).encode("utf-8")
+                if proc.stdin is None or proc.stdout is None:
+                    raise RuntimeError("Failed to open stdio pipes to RetrievalMain")
+                proc.stdin.write(struct.pack(">I", len(req_b)))
+                proc.stdin.write(req_b)
+                proc.stdin.flush()
 
-            proc.stdin.write(struct.pack(">I", len(req_bytes)))
-            proc.stdin.write(req_bytes)
-            proc.stdin.flush()
+                len_b = proc.stdout.read(4)
+                if len(len_b) < 4:
+                    err_s = proc.stderr.read().decode("utf-8", errors="replace") if proc.stderr else ""
+                    raise RuntimeError(f"RetrievalIpcServer closed stream without responding. Stderr: {err_s}")
 
-            len_buf = proc.stdout.read(4)
-            if len(len_buf) < 4:
-                stderr_str = proc.stderr.read().decode("utf-8", errors="replace") if proc.stderr else ""
-                raise RuntimeError(f"RetrievalIpcServer closed stream without responding. Stderr: {stderr_str}")
+                r_len = struct.unpack(">I", len_b)[0]
+                max_f_bytes = 16 * 1024 * 1024  # Enforce 16 MB max frame length guard
+                if r_len <= 0 or r_len > max_f_bytes:
+                    raise ValueError(
+                        f"Invalid IPC frame length from RetrievalIpcServer: {r_len} bytes "
+                        f"(must be between 1 and {max_f_bytes} bytes)"
+                    )
+                r_buf = proc.stdout.read(r_len)
+                return json.loads(r_buf.decode("utf-8"))
 
-            resp_len = struct.unpack(">I", len_buf)[0]
-            max_frame_bytes = 16 * 1024 * 1024  # Enforce 16 MB max frame length guard
-            if resp_len <= 0 or resp_len > max_frame_bytes:
-                raise ValueError(
-                    f"Invalid IPC frame length from RetrievalIpcServer: {resp_len} bytes "
-                    f"(must be between 1 and {max_frame_bytes} bytes)"
-                )
-            resp_buf = proc.stdout.read(resp_len)
-            resp_obj = json.loads(resp_buf.decode("utf-8"))
-
+            resp_obj = _query_ipc(req)
             if resp_obj.get("status") != "OK":
                 error_msg = resp_obj.get("error", "Unknown retrieval error")
                 return RetrievalEnvelope(
@@ -525,6 +552,15 @@ class JavaRetriever:
                 )
 
             records = resp_obj.get("records", [])
+            # Fallback: if 0 records found and bounds were nanoseconds (> 10^14), try querying in milliseconds
+            if not records and (start_val > 100_000_000_000_000 or end_val > 100_000_000_000_000):
+                ms_req = dict(req)
+                ms_req["start_time"] = start_val // 1_000_000
+                ms_req["end_time"] = (end_val + 999_999) // 1_000_000
+                ms_resp = _query_ipc(ms_req)
+                if ms_resp.get("status") == "OK" and ms_resp.get("records"):
+                    records = ms_resp.get("records", [])
+
             if not records:
                 return RetrievalEnvelope(
                     status="EMPTY",
@@ -544,6 +580,8 @@ class JavaRetriever:
 
                 raw_ts = int(r.get("timestamp", 0))
                 ts_ns = raw_ts + (1 << 64) if raw_ts < 0 else raw_ts
+                if 0 < ts_ns < 100_000_000_000_000:
+                    ts_ns = ts_ns * 1_000_000
 
                 payload_b64 = r.get("payload", "")
                 ev_type = int(r.get("eventType", 0))

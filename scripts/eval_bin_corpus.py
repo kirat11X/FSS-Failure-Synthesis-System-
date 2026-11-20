@@ -51,7 +51,9 @@ def iter_any_envelopes(data: bytes) -> list[EventRecord]:
         if plen < 0 or offset + 20 + plen > len(data):
             break
         payload = data[offset + 20 : offset + 20 + plen]
-        records.append(EventRecord(agent_id, ts, etype, payload))
+        # Normalize milliseconds to nanoseconds if ts < 10^14
+        ts_ns = ts * 1_000_000 if (0 < ts < 100_000_000_000_000) else ts
+        records.append(EventRecord(agent_id, ts_ns, etype, payload))
         offset += 20 + plen
     return records
 
@@ -88,6 +90,9 @@ def evaluate_file(
 
         t_min = min(r.timestamp_ns for r in sample_records)
         t_max = max(r.timestamp_ns for r in sample_records)
+        # Bounded query contract: window cannot exceed 1 hour (3600s)
+        if t_max - t_min > 3600 * 10**9:
+            t_max = t_min + 3600 * 10**9
 
         # 2. Ingest file into Java storage via FileIngestor
         retriever.ingest_clean(file_path)
@@ -139,6 +144,7 @@ def main():
     retriever = JavaRetriever(
         mode="storage_ipc",
         storage_properties=STORAGE_PROPS,
+        timeout=120.0,
     )
 
     # Gather test files

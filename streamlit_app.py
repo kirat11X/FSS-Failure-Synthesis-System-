@@ -32,9 +32,11 @@ Renders the complete interactive 8-part UI:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
+import struct
 import sys
 import tempfile
 import threading
@@ -60,7 +62,7 @@ import streamlit as st
 from fss_py.contract import UNKNOWN_LABEL
 from fss_py.decoder import decode_all
 from fss_py.evidence import build_evidence
-from fss_py.model import ALL, RetrievalRequestError, RetrievalResult
+from fss_py.model import ALL, EventRecord, RetrievalRequestError, RetrievalResult
 from fss_py.schema import load_schema_file
 from fss_py.wire import iter_envelopes
 
@@ -101,7 +103,9 @@ def iter_any_envelopes(data: bytes) -> list[EventRecord]:
         if plen < 0 or offset + 20 + plen > len(data):
             break
         payload = data[offset + 20 : offset + 20 + plen]
-        records.append(EventRecord(agent_id, ts, etype, payload))
+        # Normalize milliseconds to nanoseconds if ts < 10^14 (matches Java BlockStore)
+        ts_ns = ts * 1_000_000 if (0 < ts < 100_000_000_000_000) else ts
+        records.append(EventRecord(agent_id, ts_ns, etype, payload))
         offset += 20 + plen
     return records
 
@@ -720,23 +724,25 @@ def main() -> None:
         else:
             uploads = st.file_uploader("Upload telemetry .bin / .fss.bin files", type=["bin"], accept_multiple_files=True)
             if uploads:
+                upload_dir = ROOT / "test_data" / "uploads"
+                upload_dir.mkdir(parents=True, exist_ok=True)
                 for up in uploads:
                     file_bytes = up.getvalue()
+                    file_hash = hashlib.sha256(file_bytes).hexdigest()[:12]
+                    safe_name = re.sub(r"[^a-zA-Z0-9_.-]", "_", up.name)
+                    dest_file = upload_dir / f"{file_hash}_{safe_name}"
+                    if not dest_file.exists():
+                        dest_file.write_bytes(file_bytes)
+
                     if len(file_bytes) >= 2 and file_bytes[0] == 0xA3 and file_bytes[1] == 0x95:
                         st.info(f"✈️ Detected ArduPilot DataFlash log ({up.name}). Automatically translating flight telemetry to FSS envelopes...")
                         from scripts.convert_ardupilot_bin_to_fss import convert_log
-                        with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as raw_tmp:
-                            raw_tmp.write(file_bytes)
-                            raw_path = Path(raw_tmp.name)
-                        fss_path = raw_path.with_suffix(".fss.bin")
-                        convert_log(raw_path, fss_path)
-                        raw_path.unlink(missing_ok=True)
+                        fss_path = dest_file.with_suffix(".fss.bin")
+                        if not fss_path.exists():
+                            convert_log(dest_file, fss_path)
                         chosen_fixtures.append(fss_path)
                     else:
-                        tmp_file = tempfile.NamedTemporaryFile(suffix=".bin", delete=False)
-                        tmp_file.write(file_bytes)
-                        tmp_file.close()
-                        chosen_fixtures.append(Path(tmp_file.name))
+                        chosen_fixtures.append(dest_file)
 
         if st.button("🔄 Refresh / Re-ingest Store", use_container_width=True):
             st.cache_resource.clear()
@@ -784,9 +790,7 @@ def main() -> None:
         t_min = 1791454020000000000
         t_max = 1791454025000000000
 
-    is_ms = t_max < 10**14
-    unit_scale = 1000 if is_ms else 10**9
-    span_s = max(1, -(-(t_max - t_min + 1) // unit_scale))
+    span_s = max(1, -(-(t_max - t_min + 1) // 10**9))
 
     # Sidebar: Retrieval Bounds
     with st.sidebar:
@@ -801,8 +805,8 @@ def main() -> None:
         source_selection = st.selectbox("Source Filter", source_options, index=0)
         max_events = st.number_input("Max Events", min_value=1, max_value=10000, value=100, step=10)
 
-        t_start_ns = t_min + offset * unit_scale
-        t_end_ns = min(t_start_ns + duration * unit_scale, t_start_ns + (3600 * unit_scale if is_ms else MAX_WINDOW_NS))
+        t_start_ns = t_min + offset * 10**9
+        t_end_ns = min(t_start_ns + duration * 10**9, t_start_ns + MAX_WINDOW_NS)
 
         st.divider()
         st.header("🤖 Qwen Model Resolution")

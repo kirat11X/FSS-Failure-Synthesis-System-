@@ -613,7 +613,11 @@ public final class JavaStoreBridge {
     private static long parseTimeNs(String text) {
         text = text.trim();
         if (text.chars().allMatch(Character::isDigit)) {
-            return Long.parseUnsignedLong(text);
+            long val = Long.parseUnsignedLong(text);
+            if (val > 0 && val < 100_000_000_000_000L) {
+                return val * 1_000_000L;
+            }
+            return val;
         }
         Instant inst = Instant.parse(text);
         return inst.getEpochSecond() * 1_000_000_000L + inst.getNano();
