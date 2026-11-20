@@ -22,11 +22,14 @@ htmlcov/
 
 # Java build output
 fss-core/target/
+fss-core/lib/
+*.jar
 *.class
 
 # Runtime data
 *.dat
 *.lock
+fss-core/test-data/
 
 # Downloaded research PDFs (keep research_papers/README.md only)
 research_papers/*/

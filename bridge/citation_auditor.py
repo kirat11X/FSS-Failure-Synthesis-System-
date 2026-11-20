@@ -319,7 +319,9 @@ class CitationAuditor:
         for sent in sentences:
             sent_cites = [cid for cid in valid_citations if f"[{cid}]" in sent]
             for cid in sent_cites:
-                ev = known_events[cid]
+                ev = known_events.get(cid)
+                if ev is None:
+                    continue
                 ev_src = ev["source_id"]  # e.g. 298
                 ev_name = ev.get("event_name") or ""
 
@@ -373,7 +375,9 @@ class CitationAuditor:
         atomic_claims = self._extract_atomic_claims(f"{summary_text} {likely_cause_text}", valid_citations)
         for claim in atomic_claims:
             for cid in claim["citations"]:
-                ev = known_events[cid]
+                ev = known_events.get(cid)
+                if ev is None:
+                    continue
                 # Numeric fidelity check
                 numbers_in_claim = re.findall(r"\b([0-9]+(?:\.[0-9]+)?)\b", claim["claim_text"])
                 fields = ev.get("fields", {})

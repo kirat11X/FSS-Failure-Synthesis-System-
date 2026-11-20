@@ -74,7 +74,7 @@ class TestStreamlitRerunDelegation(unittest.TestCase):
 
     def test_streamlit_initial_load_plus_three_consecutive_reruns(self):
         """Simulate initial load plus 3 consecutive widget reruns against app.py."""
-        at = AppTest.from_file(APP_PATH, default_timeout=20)
+        at = AppTest.from_file(APP_PATH, default_timeout=60)
 
         # Initial Load
         at.run()

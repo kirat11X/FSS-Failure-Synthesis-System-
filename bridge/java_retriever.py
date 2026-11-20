@@ -13,12 +13,14 @@ Engineered against:
 
 from __future__ import annotations
 
+import base64
 import fcntl
 import json
 import os
 import shutil
 import signal
 import socket
+import struct
 import subprocess
 import tempfile
 import time
@@ -163,19 +165,31 @@ class JavaRetriever:
 
     def __init__(
         self,
-        store_path: str | Path,
+        store_path: str | Path | None = None,
         *,
         classpath: str | None = None,
         java_bin: str = "java",
-        mode: Literal["auto", "worker", "cli"] = "auto",
+        mode: Literal["auto", "worker", "cli", "storage_ipc"] = "auto",
         socket_path: str | Path = "/tmp/fss_bridge.sock",
+        storage_properties: str | Path | None = None,
         timeout: float = 30.0,
     ) -> None:
         root = Path(__file__).resolve().parent.parent
         self.root = root
 
-        store_p = Path(store_path)
-        self.store_path = store_p if store_p.is_absolute() else (root / store_p).resolve()
+        if store_path is not None:
+            store_p = Path(store_path)
+            self.store_path = store_p if store_p.is_absolute() else (root / store_p).resolve()
+        else:
+            self.store_path = root / "bridge" / "blocks.dat"
+
+        if storage_properties is not None:
+            sp = Path(storage_properties)
+            self.storage_properties: Path | None = sp if sp.is_absolute() else (root / sp).resolve()
+        else:
+            default_sp = root / "fss-core" / "storage.properties"
+            self.storage_properties = default_sp if default_sp.exists() else None
+
         self.java_bin = resolve_java_bin(java_bin)
         self.mode = mode
         self.socket_path = Path(socket_path).resolve()
@@ -184,7 +198,9 @@ class JavaRetriever:
         if classpath is None:
             core_classes = root / "fss-core" / "target" / "classes"
             bridge_classes = root / "bridge" / "classes"
-            self.classpath = f"{core_classes}:{bridge_classes}"
+            lib_dir = root / "fss-core" / "lib"
+            jars = [str(p) for p in sorted(lib_dir.glob("*.jar"))] if lib_dir.exists() else []
+            self.classpath = ":".join([str(core_classes), str(bridge_classes)] + jars)
         else:
             resolved_entries = []
             for entry in classpath.split(":"):
@@ -344,6 +360,129 @@ class JavaRetriever:
             finally:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
+    def _retrieve_via_storage_ipc(
+        self,
+        source: int | _AllSources,
+        t_start_ns: int,
+        t_end_ns: int,
+        *,
+        max_events: int,
+        event_type: int | None = None,
+        trace_id: str | None = None,
+    ) -> RetrievalEnvelope:
+        """Query the Retrieval.RetrievalMain IPC server using 4-byte Big-Endian framing."""
+        if self.storage_properties is None or not self.storage_properties.exists():
+            raise FileNotFoundError(f"Storage properties file not found: {self.storage_properties}")
+
+        tid = bind_trace_id(trace_id)
+        # StorageConfig timestamps are in milliseconds; convert if provided in nanoseconds
+        start_ms = t_start_ns // 1_000_000 if t_start_ns > 10_000_000_000_000 else t_start_ns
+        end_ms = t_end_ns // 1_000_000 if t_end_ns > 10_000_000_000_000 else t_end_ns
+
+        source_val: str | int = "all" if source is ALL else (int(source) if isinstance(source, int) else str(source))
+        req = {
+            "source": source_val,
+            "start_time": int(start_ms),
+            "end_time": int(end_ms),
+            "event_type": event_type,
+        }
+
+        cmd = [
+            self.java_bin,
+            "-Dfile.encoding=UTF-8",
+            "-cp",
+            self.classpath,
+            "Retrieval.RetrievalMain",
+            str(self.storage_properties),
+        ]
+
+        proc = subprocess.Popen(
+            cmd,
+            cwd=self.root,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+
+        try:
+            req_bytes = json.dumps(req).encode("utf-8")
+            if proc.stdin is None or proc.stdout is None:
+                raise RuntimeError("Failed to open stdio pipes to RetrievalMain")
+
+            proc.stdin.write(struct.pack(">I", len(req_bytes)))
+            proc.stdin.write(req_bytes)
+            proc.stdin.flush()
+
+            len_buf = proc.stdout.read(4)
+            if len(len_buf) < 4:
+                stderr_str = proc.stderr.read().decode("utf-8", errors="replace") if proc.stderr else ""
+                raise RuntimeError(f"RetrievalIpcServer closed stream without responding. Stderr: {stderr_str}")
+
+            resp_len = struct.unpack(">I", len_buf)[0]
+            resp_buf = proc.stdout.read(resp_len)
+            resp_obj = json.loads(resp_buf.decode("utf-8"))
+
+            if resp_obj.get("status") != "OK":
+                error_msg = resp_obj.get("error", "Unknown retrieval error")
+                return RetrievalEnvelope(
+                    status="ERROR",
+                    error_message=error_msg,
+                    trace_id=tid,
+                )
+
+            records = resp_obj.get("records", [])
+            if not records:
+                return RetrievalEnvelope(
+                    status="EMPTY",
+                    events=[],
+                    trace_id=tid,
+                )
+
+            from bridge.schemas import TelemetryEventWire
+
+            wire_events = []
+            for r in records[:max_events]:
+                agent_str = str(r.get("agentId", "0"))
+                try:
+                    src_id = int(agent_str)
+                except ValueError:
+                    src_id = 0
+
+                raw_ts = int(r.get("timestamp", 0))
+                ts_ns = raw_ts * 1_000_000 if raw_ts < 10_000_000_000_000 else raw_ts
+
+                payload_b64 = r.get("payload", "")
+                ev_type = int(r.get("eventType", 0))
+
+                wire_events.append(
+                    TelemetryEventWire(
+                        source_id=src_id,
+                        timestamp_ns=ts_ns,
+                        event_type=ev_type,
+                        payload_b64=payload_b64,
+                    )
+                )
+
+            return RetrievalEnvelope(
+                status="OK",
+                count=len(wire_events),
+                truncated=len(records) > max_events,
+                events=wire_events,
+                trace_id=tid,
+            )
+        finally:
+            try:
+                if proc.stdin:
+                    proc.stdin.close()
+                os.killpg(proc.pid, signal.SIGTERM)
+                proc.wait(timeout=2.0)
+            except Exception:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except Exception:
+                    pass
+
     def retrieve_envelope(
         self,
         source: int | _AllSources,
@@ -366,6 +505,16 @@ class JavaRetriever:
 
         tid = bind_trace_id(trace_id)
         source_arg = "ALL" if source is ALL else str(source)
+
+        if self.mode == "storage_ipc":
+            return self._retrieve_via_storage_ipc(
+                source,
+                t_start_ns,
+                t_end_ns,
+                max_events=max_events,
+                event_type=event_type,
+                trace_id=tid,
+            )
 
         # 1. Try persistent worker if available and enabled
         use_worker = (self.mode == "worker") or (self.mode == "auto" and self.is_worker_alive(self.socket_path))
