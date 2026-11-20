@@ -30,6 +30,7 @@ fss-core/lib/
 *.dat
 *.lock
 fss-core/test-data/
+test_data/uploads/
 
 # Downloaded research PDFs (keep research_papers/README.md only)
 research_papers/*/

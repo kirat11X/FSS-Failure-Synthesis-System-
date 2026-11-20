@@ -8,6 +8,7 @@ Combines:
   3. Local reranker (cross-encoder or calibrated score weighting) selecting top 5-8 chunks.
   4. RCACopilot-pattern historical resolved incidents index/store:
      Retrieves K = 3-15 condensed diagnostic exemplars for few-shot Chain-of-Thought (CoT).
+  5. Multi-vendor error catalog indexing and evidence enrichment.
 """
 
 from __future__ import annotations
@@ -27,6 +28,12 @@ from typing import Any, Sequence
 
 import bm25s
 import numpy as np
+
+from bridge.error_catalog import (
+    VendorErrorEntry,
+    extract_error_codes_from_events,
+    load_builtin_manual,
+)
 
 # ---------------------------------------------------------------------------
 # Domain Knowledge Base (Runbooks, Error Codes, Fleet Specs)
@@ -377,7 +384,10 @@ class LocalDenseEmbedder:
 # ---------------------------------------------------------------------------
 
 class HybridRetriever:
-    """Local hybrid retriever combining BM25S lexical search and Dense embeddings via RRF (k=60)."""
+    """Local hybrid retriever combining BM25S lexical search and Dense embeddings via RRF (k=60).
+
+    Supports dual-source indexing: default DOMAIN_KNOWLEDGE and dynamic VendorErrorEntry chunks.
+    """
 
     _instance: HybridRetriever | None = None
 
@@ -387,10 +397,41 @@ class HybridRetriever:
             cls._instance = cls()
         return cls._instance
 
-    def __init__(self, corpus: list[dict[str, str]] | None = None) -> None:
-        self.corpus = corpus if corpus is not None else list(DOMAIN_KNOWLEDGE)
+    def __init__(
+        self,
+        corpus: list[dict[str, str]] | None = None,
+        vendor_entries: Sequence[VendorErrorEntry] | None = None,
+    ) -> None:
+        self.corpus: list[dict[str, str]] = list(corpus) if corpus is not None else [dict(d) for d in DOMAIN_KNOWLEDGE]
         self.embedder = LocalDenseEmbedder()
+        if vendor_entries:
+            for entry in vendor_entries:
+                self._add_vendor_entry_doc(entry)
         self._init_indices()
+
+    def _add_vendor_entry_doc(self, entry: VendorErrorEntry) -> None:
+        doc = entry.to_doc()
+        doc_id = doc.get("id") or f"err-{entry.vendor}-{entry.error_code}"
+        doc["id"] = doc_id
+        doc["chunk"] = f"{doc_id}#1"
+
+        # Check if already in corpus
+        for idx, existing in enumerate(self.corpus):
+            if existing.get("id") == doc_id:
+                self.corpus[idx] = doc
+                return
+        self.corpus.append(doc)
+
+    def index_vendor_manual(self, entries: Sequence[VendorErrorEntry]) -> None:
+        """Dynamically index vendor manual entries as first-class RAG chunks."""
+        for entry in entries:
+            self._add_vendor_entry_doc(entry)
+        self._init_indices()
+
+    def load_builtin_vendor_manuals(self, vendor_name: str = "auto") -> None:
+        """Load and index built-in vendor reference manuals."""
+        entries = load_builtin_manual(vendor_name)
+        self.index_vendor_manual(entries)
 
     def _init_indices(self) -> None:
         """Build BM25S index and pre-compute dense embeddings for the corpus."""
@@ -416,14 +457,19 @@ class HybridRetriever:
         rrf_k: int = 60,
     ) -> list[dict[str, str]]:
         """Retrieve top_k domain knowledge chunks via BM25S + Dense + RRF + Reranker."""
-        # Augment query with terms from evidence anomalies and event names
+        # Augment query with terms from evidence anomalies, error codes, and event names
         expanded_query_terms: list[str] = extract_search_terms(query)
+        evidence_error_codes: list[str] = []
         if evidence:
-            for ev in evidence.get("events", []):
+            ev_list = evidence.get("events", [])
+            evidence_error_codes = extract_error_codes_from_events(ev_list)
+            for code in evidence_error_codes:
+                expanded_query_terms.extend(extract_search_terms(code))
+            for ev in ev_list:
                 if ev.get("event_name"):
                     expanded_query_terms.extend(extract_search_terms(ev["event_name"]))
                 if ev.get("event_type"):
-                    expanded_query_terms.extend(extract_search_terms(ev["event_type"]))
+                    expanded_query_terms.extend(extract_search_terms(str(ev["event_type"])))
                 for k, v in ev.get("fields", {}).items():
                     if isinstance(v, (str, int)):
                         expanded_query_terms.extend(extract_search_terms(str(v)))
@@ -435,7 +481,7 @@ class HybridRetriever:
 
         # 1. BM25S Lexical Ranking
         query_tokens = [extract_search_terms(expanded_query)]
-        bm25_res, bm25_scores = self.bm25_model.retrieve(query_tokens, k=min(n_docs, 20), show_progress=False)
+        bm25_res, bm25_scores = self.bm25_model.retrieve(query_tokens, k=min(n_docs, 30), show_progress=False)
         bm25_indices = bm25_res[0] if len(bm25_res) > 0 else []
 
         bm25_rank_map: dict[int, int] = {}
@@ -467,10 +513,13 @@ class HybridRetriever:
         reranked_scores: list[tuple[int, float]] = []
         raw_query_tokens = set(extract_search_terms(query))
         evidence_critical_terms = set(expanded_query_terms)
+        norm_evidence_codes = {c.lower() for c in evidence_error_codes}
 
         for idx, base_rrf in rrf_scores.items():
             doc = self.corpus[idx]
             doc_text = self.corpus_texts[idx].lower()
+            doc_id = doc.get("id", "").lower()
+            doc_explains = doc.get("explains", "").lower()
 
             # Boost exact alphanumeric matches (e.g. '0x10', '17', 'LIDAR_TIMEOUT', 'COLLISION_RISK')
             alpha_boost = 0.0
@@ -481,10 +530,16 @@ class HybridRetriever:
                     else:
                         alpha_boost += 0.01
 
+            # Exact error code match boost from evidence
+            error_code_boost = 0.0
+            for code in norm_evidence_codes:
+                if code in doc_id or code in doc_explains or f" {code} " in f" {doc_text} ":
+                    error_code_boost += 0.15
+
             # Exact query title bonus
             title_boost = 0.05 if any(t in doc.get("title", "").lower() for t in raw_query_tokens) else 0.0
 
-            final_score = base_rrf + alpha_boost + title_boost
+            final_score = base_rrf + alpha_boost + error_code_boost + title_boost
             reranked_scores.append((idx, final_score))
 
         # Sort by final reranked score descending
@@ -556,6 +611,63 @@ class HistoricalIncidentsStore:
             lines.append("")
 
         return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Vendor Manual Evidence Enrichment
+# ---------------------------------------------------------------------------
+
+def enrich_evidence_with_manual(
+    evidence: dict[str, Any],
+    catalog: list[VendorErrorEntry],
+) -> list[dict[str, Any]]:
+    """Extract error codes from evidence['events'], match against catalog, and return enriched fault descriptions.
+
+    Ready to be injected into prompt context.
+    """
+    if not evidence or not catalog:
+        return []
+
+    events = evidence.get("events", [])
+    extracted_codes = extract_error_codes_from_events(events)
+    norm_codes = {c.strip().lower() for c in extracted_codes if c.strip()}
+
+    matched: list[VendorErrorEntry] = []
+    seen_ids: set[str] = set()
+
+    def _match_entry(entry: VendorErrorEntry) -> bool:
+        # Check error_code
+        e_code = entry.error_code.strip().lower()
+        if e_code in norm_codes:
+            return True
+        # Check aliases
+        for alias in entry.aliases:
+            if alias.strip().lower() in norm_codes:
+                return True
+        return False
+
+    for entry in catalog:
+        if _match_entry(entry):
+            if entry.doc_chunk_id not in seen_ids:
+                seen_ids.add(entry.doc_chunk_id)
+                matched.append(entry)
+
+    # Format enriched fault descriptions
+    enriched: list[dict[str, Any]] = []
+    for m in matched:
+        enriched.append({
+            "error_code": m.error_code,
+            "vendor": m.vendor,
+            "subsystem": m.subsystem,
+            "severity": m.severity,
+            "title": m.title,
+            "description": m.description,
+            "probable_causes": list(m.probable_causes),
+            "recommended_actions": list(m.recommended_actions),
+            "doc_chunk_id": m.doc_chunk_id,
+        })
+
+    return enriched
 
 
 # ---------------------------------------------------------------------------

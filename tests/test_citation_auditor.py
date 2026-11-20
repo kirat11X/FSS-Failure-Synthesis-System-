@@ -245,6 +245,47 @@ class TestCitationAuditor(unittest.TestCase):
         self.assertEqual(report.badge, ValidationBadge.INSUFFICIENT_EVIDENCE)
         self.assertEqual(report.verdict, "REJECTED")
 
+    def test_11_err_citations_valid(self):
+        """Valid vendor error manual citations ([err-...]) validate cleanly without KeyError."""
+        vendor_matches = [
+            {"id": "err-subsys-2-code-1", "title": "Crash Check Error", "description": "Crash detector triggered."}
+        ]
+        synth = {
+            "summary": "Drone 474 performed avoidance [ev-722d707b684c] following vendor error alert [err-subsys-2-code-1].",
+            "likely_cause": "Avoidance manoeuvre for collision risk [ev-722d707b684c].",
+            "confidence": "medium",
+            "contributing_events": [
+                {"source_id": 474, "timestamp": 1791454023050000000, "event_type": "AVOIDANCE", "event_id": "ev-722d707b684c"}
+            ],
+            "uncertainty": [],
+            "data_gaps": [],
+        }
+        report = self.auditor.audit(
+            synth,
+            self.evidence,
+            knowledge=DOMAIN_KNOWLEDGE,
+            vendor_manual_matches=vendor_matches,
+        )
+        self.assertIn("err-subsys-2-code-1", report.valid_citations)
+        self.assertNotIn("err-subsys-2-code-1", report.invalid_citations)
+        self.assertTrue(report.tier_results["tier1_id_integrity"]["passed"])
+
+    def test_12_err_citations_hallucinated_rejected(self):
+        """Hallucinated vendor error citations ([err-fake]) are caught and rejected."""
+        synth = {
+            "summary": "Drone 474 suffered crash [ev-722d707b684c] documented under [err-fake].",
+            "likely_cause": None,
+            "confidence": "medium",
+            "contributing_events": [
+                {"source_id": 474, "timestamp": 1791454023050000000, "event_type": "AVOIDANCE", "event_id": "ev-722d707b684c"}
+            ],
+            "uncertainty": [],
+            "data_gaps": [],
+        }
+        report = self.auditor.audit(synth, self.evidence, knowledge=DOMAIN_KNOWLEDGE, auto_refine=False)
+        self.assertIn("err-fake", report.invalid_citations)
+        self.assertEqual(report.badge, ValidationBadge.UNGROUNDED_HALLUCINATION)
+
 
 if __name__ == "__main__":
     unittest.main()

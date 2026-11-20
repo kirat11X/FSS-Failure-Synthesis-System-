@@ -18,7 +18,7 @@ import re
 import secrets
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_serializer, field_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_serializer, field_validator, model_validator
 
 from fss_py.model import EventRecord
 
@@ -151,6 +151,12 @@ class DataGapWire(BaseModel):
     def _serialize_uint64(self, v: int) -> str:
         return str(v)
 
+    @model_validator(mode="after")
+    def _enforce_ordered_gap_bounds(self) -> DataGapWire:
+        if self.gap_start_ns > self.gap_end_ns:
+            self.gap_start_ns, self.gap_end_ns = self.gap_end_ns, self.gap_start_ns
+        return self
+
     @property
     def gap_start_ns_str(self) -> str:
         return str(self.gap_start_ns)
@@ -179,6 +185,7 @@ class RetrievalEnvelope(BaseModel):
     error_message: str | None = Field(default=None, description="Detailed diagnostic error message on failure")
     min_ts_ns: int | None = Field(default=None, description="Earliest recorded timestamp in store")
     max_ts_ns: int | None = Field(default=None, description="Latest recorded timestamp in store")
+    scope: Literal["full_dataset", "interval"] | None = Field(default=None, description="Query scope")
 
     @field_validator("min_ts_ns", "max_ts_ns", mode="before")
     @classmethod
@@ -192,6 +199,13 @@ class RetrievalEnvelope(BaseModel):
     @field_serializer("min_ts_ns", "max_ts_ns")
     def _serialize_optional_uint64(self, v: int | None) -> str | None:
         return str(v) if v is not None else None
+
+    @model_validator(mode="after")
+    def _enforce_ordered_envelope_bounds(self) -> RetrievalEnvelope:
+        if self.min_ts_ns is not None and self.max_ts_ns is not None:
+            if self.min_ts_ns > self.max_ts_ns:
+                self.min_ts_ns, self.max_ts_ns = self.max_ts_ns, self.min_ts_ns
+        return self
 
 
 class IngestRequest(BaseModel):
@@ -218,11 +232,24 @@ class RetrieveRequestWire(BaseModel):
     action: Literal["retrieve"] = "retrieve"
     store_path: str
     source: str = "ALL"
-    start_ns: str
-    end_ns: str
+    start_ns: str = "0"
+    end_ns: str = "0"
     max_events: int = 100
     event_type: int | None = None
+    scope: Literal["full_dataset", "interval"] = "full_dataset"
     trace_id: str = Field(pattern=r"^[0-9a-fA-F]{32}$")
+
+    @model_validator(mode="after")
+    def _enforce_ordered_request_bounds(self) -> RetrieveRequestWire:
+        try:
+            s = int(self.start_ns)
+            e = int(self.end_ns)
+            if s > e:
+                self.start_ns = str(e)
+                self.end_ns = str(s)
+        except (ValueError, TypeError):
+            pass
+        return self
 
 
 # TypeAdapters for fast compiled pydantic-core validation

@@ -175,6 +175,90 @@ class TestSufficiencyGate(unittest.TestCase):
         self.assertTrue(span_check.passed)
         self.assertGreaterEqual(span_check.score, 0.7)
 
+    def test_08_no_false_lockout_on_general_queries(self):
+        """General exploratory queries must not falsely lock out on logs containing telemetry."""
+        general_queries = [
+            "What went wrong in this log?",
+            "Analyze all errors and root causes",
+            "Why did altitude diverge?",
+            "Summarize anomalies using the error code manual",
+        ]
+        for q in general_queries:
+            res = evaluate_sufficiency(self.evidence_scenario, q)
+            self.assertTrue(res.is_sufficient, f"False lockout on query: {q}")
+            self.assertEqual(res.status, SufficiencyStatus.SUFFICIENT)
+
+    def test_09_no_false_entity_extraction_on_numbers(self):
+        """Numbers like 404, 500, 100, 171 must not be treated as required entity source IDs."""
+        query = "Explain HTTP 404 or error 500 at altitude 100 in log 171"
+        res = evaluate_sufficiency(self.evidence_scenario, query)
+        cov_check = next(c for c in res.checks if c.name == "question_content_coverage")
+        self.assertTrue(cov_check.passed)
+        self.assertEqual(cov_check.score, 1.0)
+        self.assertTrue(res.is_sufficient)
+
+    def test_10_blackout_data_gap_short_circuit(self):
+        """A genuine blackout gap (> 30s) across failure window short-circuits to INSUFFICIENT_EVIDENCE."""
+        blackout_evidence = {
+            "format": "fss-evidence/v0",
+            "query": "What caused the crash?",
+            "sources": [1],
+            "events": [
+                {
+                    "event_id": "ev-000000000001",
+                    "source_id": 1,
+                    "timestamp_ns": 1719001000000000000,
+                    "event_name": "GPS",
+                    "decode_status": "SUCCESS",
+                    "fields": {},
+                },
+                {
+                    "event_id": "ev-000000000002",
+                    "source_id": 1,
+                    # 42-second blackout gap (42 * 10^9 ns)
+                    "timestamp_ns": 1719001000000000000 + 42_000_000_000,
+                    "event_name": "ERROR",
+                    "decode_status": "SUCCESS",
+                    "fields": {"subsys": 1, "ecode": 99},
+                },
+            ],
+            "data_gaps": [],
+        }
+        res = evaluate_sufficiency(blackout_evidence, "What caused the crash?")
+        self.assertFalse(res.is_sufficient)
+        self.assertEqual(res.status, SufficiencyStatus.INSUFFICIENT_EVIDENCE)
+        self.assertTrue(res.bypass_synthesis)
+        self.assertIn("blackout", res.reason.lower())
+
+    def test_11_vendor_manual_matches_candidate_spans(self):
+        """Vendor-manual error matches are recognized as candidate anomaly spans."""
+        nominal_evidence = {
+            "format": "fss-evidence/v0",
+            "query": "Summarize anomalies using the error code manual",
+            "sources": [1],
+            "events": [
+                {
+                    "event_id": "ev-000000000001",
+                    "source_id": 1,
+                    "event_name": "HEARTBEAT",
+                    "decode_status": "SUCCESS",
+                    "fields": {"status_name": "NOMINAL"},
+                }
+            ],
+            "data_gaps": [],
+        }
+        vendor_matches = [
+            {"id": "err-subsys-2-code-1", "title": "Crash Check Error", "description": "Crash detector triggered."}
+        ]
+        res = evaluate_sufficiency(
+            nominal_evidence,
+            "Summarize anomalies using the error code manual",
+            vendor_manual_matches=vendor_matches,
+        )
+        self.assertTrue(res.is_sufficient)
+        span_check = next(c for c in res.checks if c.name == "candidate_span_detection")
+        self.assertTrue(span_check.passed)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -75,6 +75,7 @@ def render_report(
     val_report: Any,
     model_name: str,
     exemplars: Sequence[HistoricalIncident] | None = None,
+    vendor_matches: list[dict[str, Any]] | None = None,
 ) -> str:
     """Render the official 8-part FSS Failure Synthesis Report."""
     ret_req = retrieval_res.request
@@ -164,6 +165,18 @@ def render_report(
         lines.append(f"- `{k['chunk']}` ({k['kind']}, {k['domain']}; explains {k.get('explains', 'N/A')}):")
         for kline in k["content"].splitlines():
             lines.append(f"    {kline}")
+    if vendor_matches:
+        lines.append("")
+        lines.append(f"Digested Vendor Error-Code Manual Matches ({len(vendor_matches)} matches):")
+        for vm in vendor_matches:
+            vm_id = vm.get("id") or vm.get("err_id") or vm.get("code") or "err-match"
+            if not str(vm_id).startswith(("err-", "doc-")):
+                vm_id = f"err-{vm_id}"
+            lines.append(f"- `{vm_id}`: {vm.get('title', 'Error')} (code={vm.get('code', 'N/A')}, subsys={vm.get('subsystem', 'N/A')}):")
+            if vm.get("description"):
+                lines.append(f"    Description: {vm['description']}")
+            if vm.get("remedy") or vm.get("runbook"):
+                lines.append(f"    Runbook: {vm.get('remedy') or vm.get('runbook')}")
     if exemplars:
         lines.append("")
         lines.append(f"Retrieved {len(exemplars)} Historical Incident Exemplars (RCACopilot Few-Shot CoT):")
@@ -176,7 +189,13 @@ def render_report(
 
     # [6] LLM Context / Evidence JSON
     lines.append("[6] LLM context")
-    llm_context = build_llm_context(evidence, query, knowledge, exemplars=exemplars)
+    llm_context = build_llm_context(
+        evidence,
+        query,
+        knowledge,
+        exemplars=exemplars,
+        vendor_manual_matches=vendor_matches,
+    )
     lines.append("```text")
     lines.append(llm_context)
     lines.append("```")
@@ -277,6 +296,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--thinking-budget", type=int, default=DEFAULT_THINKING_BUDGET, help="Token budget for thinking phase")
     parser.add_argument("--num-ctx", type=int, default=DEFAULT_NUM_CTX, help="Context window length (num_ctx >= 16384)")
     parser.add_argument("--exemplars-k", type=int, default=3, help="Number of historical incident exemplars to retrieve (3-15)")
+    parser.add_argument("--vendor-manual", default=None, help="Path to vendor error manual JSON file or inline JSON string")
+    parser.add_argument("--error-catalog", default=None, help="Path to error catalog JSON file or inline JSON string")
     parser.add_argument(
         "--json-out",
         nargs="?",
@@ -286,6 +307,39 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     args = parser.parse_args(argv)
+
+    # Load vendor manual matches or error catalog if provided
+    vendor_matches: list[dict[str, Any]] = []
+    for source_arg in (args.vendor_manual, args.error_catalog):
+        if not source_arg:
+            continue
+        src_path = Path(source_arg)
+        if not src_path.is_absolute():
+            src_path = ROOT_DIR / src_path
+        if src_path.is_file():
+            try:
+                parsed_data = json.loads(src_path.read_text(encoding="utf-8"))
+                if isinstance(parsed_data, list):
+                    vendor_matches.extend(parsed_data)
+                elif isinstance(parsed_data, dict):
+                    if "errors" in parsed_data and isinstance(parsed_data["errors"], list):
+                        vendor_matches.extend(parsed_data["errors"])
+                    else:
+                        vendor_matches.append(parsed_data)
+            except Exception:
+                pass
+        else:
+            try:
+                parsed_data = json.loads(source_arg)
+                if isinstance(parsed_data, list):
+                    vendor_matches.extend(parsed_data)
+                elif isinstance(parsed_data, dict):
+                    if "errors" in parsed_data and isinstance(parsed_data["errors"], list):
+                        vendor_matches.extend(parsed_data["errors"])
+                    else:
+                        vendor_matches.append(parsed_data)
+            except Exception:
+                pass
 
     # 1. Read envelope stream
     if args.file:
@@ -344,6 +398,7 @@ def main(argv: list[str] | None = None) -> int:
         thinking_budget=args.thinking_budget,
         effective_num_ctx=args.num_ctx,
         exemplars_k=args.exemplars_k,
+        vendor_manual_matches=vendor_matches,
     )
 
     # 8. Output report or JSON
@@ -356,12 +411,14 @@ def main(argv: list[str] | None = None) -> int:
         val_report,
         model_name,
         exemplars=exemplars,
+        vendor_matches=vendor_matches,
     )
 
     if args.json_out:
         out = {
             "evidence": evidence,
             "knowledge": knowledge,
+            "vendor_matches": vendor_matches,
             "exemplars": [asdict(ex) for ex in exemplars],
             "synthesis": synthesis,
             "validation": {

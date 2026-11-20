@@ -37,10 +37,14 @@ from fss_py.model import (
 )
 from bridge.schemas import (
     RETRIEVAL_ENVELOPE_ADAPTER,
+    DataGapWire,
     RetrievalEnvelope,
+    TelemetryEventWire,
+    UINT64_MAX,
     bind_trace_id,
     get_or_create_trace_id,
 )
+from bridge.bin_ingestor import BinCacheManager, normalize_time_bounds
 
 MAX_OUTPUT_BYTES = 64 * 1024 * 1024  # 64 MiB ceiling to prevent unbounded pipe buffering
 
@@ -185,11 +189,13 @@ def resolve_and_convert_fixtures(
                 with open(resolved_fp, "rb") as tf:
                     head2 = tf.read(2)
                 if len(head2) == 2 and head2[0] == 0xA3 and head2[1] == 0x95:
-                    from scripts.convert_ardupilot_bin_to_fss import convert_log
                     out_fss = resolved_fp.with_suffix(".fss.bin")
-                    if not out_fss.exists():
-                        convert_log(resolved_fp, out_fss)
-                    resolved.append(str(out_fss))
+                    if out_fss.exists() and out_fss.stat().st_size > 0:
+                        resolved.append(str(out_fss))
+                        continue
+                    cache_mgr = BinCacheManager(root / "test_data" / "uploads")
+                    cached_fss, _ = cache_mgr.get_or_ingest(resolved_fp, filename=resolved_fp.name)
+                    resolved.append(str(cached_fss))
                     continue
                 if for_storage_ipc and len(head2) == 2 and head2[0] == 0x53 and head2[1] == 0x46:
                     conv_dir = Path("/tmp/fss_converted")
@@ -485,6 +491,11 @@ class JavaRetriever:
             raise FileNotFoundError(f"Storage properties file not found: {self.storage_properties}")
 
         tid = bind_trace_id(trace_id)
+        if t_start_ns > t_end_ns:
+            t_start_ns, t_end_ns = t_end_ns, t_start_ns
+        if t_start_ns == t_end_ns:
+            t_end_ns = t_start_ns + 1
+
         start_val = int(t_start_ns)
         end_val = int(t_end_ns)
         if start_val >= (1 << 63):
@@ -595,12 +606,17 @@ class JavaRetriever:
                     )
                 )
 
+            min_ts = min((w.timestamp_ns for w in wire_events), default=t_start_ns)
+            max_ts = max((w.timestamp_ns for w in wire_events), default=t_end_ns)
+
             return RetrievalEnvelope(
                 status="OK",
                 count=len(wire_events),
                 truncated=len(records) > max_events,
                 events=wire_events,
                 trace_id=tid,
+                min_ts_ns=min_ts,
+                max_ts_ns=max_ts,
             )
         finally:
             try:
@@ -616,7 +632,7 @@ class JavaRetriever:
 
     def retrieve_envelope(
         self,
-        source: int | _AllSources,
+        source: int | _AllSources | str,
         t_start_ns: int,
         t_end_ns: int,
         *,
@@ -625,9 +641,23 @@ class JavaRetriever:
         trace_id: str | None = None,
     ) -> RetrievalEnvelope:
         """Perform bounded retrieval returning the complete Pydantic v2 typed envelope."""
+        # Normalize source if str
+        if source is ALL or (isinstance(source, str) and source.strip().upper() == "ALL"):
+            src_val: int | _AllSources = ALL
+        elif isinstance(source, (int, str)):
+            src_val = int(source)
+        else:
+            src_val = source
+
+        # Enforce non-negative bounds
+        if t_start_ns > t_end_ns:
+            t_start_ns, t_end_ns = t_end_ns, t_start_ns
+        if t_start_ns == t_end_ns:
+            t_end_ns = t_start_ns + 1
+
         # Contract validation: raises RetrievalRequestError if bounded window or max_events is violated
         RetrievalRequest(
-            source=source,
+            source=src_val,
             t_start_ns=t_start_ns,
             t_end_ns=t_end_ns,
             max_events=max_events,
@@ -635,11 +665,11 @@ class JavaRetriever:
         )
 
         tid = bind_trace_id(trace_id)
-        source_arg = "ALL" if source is ALL else str(source)
+        source_arg = "ALL" if src_val is ALL else str(src_val)
 
         if self.mode == "storage_ipc":
             return self._retrieve_via_storage_ipc(
-                source,
+                src_val,
                 t_start_ns,
                 t_end_ns,
                 max_events=max_events,
@@ -763,3 +793,155 @@ class JavaRetriever:
 
         events = [ev.to_event_record() for ev in envelope.events]
         return RetrievalResult(request=request, events=events, truncated=envelope.truncated)
+
+    def retrieve_full_dataset(
+        self,
+        source: int | _AllSources = ALL,
+        max_events: int = 10000,
+        trace_id: str | None = None,
+    ) -> RetrievalEnvelope:
+        """Whole-dataset retrieval across the full time span of the file/store.
+
+        Retrieves across the full [min_ts, max_ts] span. If the total span exceeds
+        MAX_WINDOW_NS (1 hour = 3600s), retrieves in consecutive 1-hour chunks and merges
+        the resulting events (deduplicated by timestamp_ns and source_id), stopping if
+        max_events is reached.
+
+        Returns a complete RetrievalEnvelope with status="OK", truncated=(count >= max_events),
+        and all collected events.
+        """
+        # Normalize source
+        if source is ALL or (isinstance(source, str) and source.strip().upper() == "ALL"):
+            src_val: int | _AllSources = ALL
+        elif isinstance(source, (int, str)):
+            src_val = int(source)
+        else:
+            src_val = source
+
+        tid = bind_trace_id(trace_id)
+
+        # 1. Storage IPC mode
+        if self.mode == "storage_ipc":
+            envelope = self._retrieve_via_storage_ipc(
+                src_val,
+                0,
+                UINT64_MAX,
+                max_events=max_events,
+                trace_id=tid,
+            )
+            wire_events = envelope.events
+            min_ts = min((ev.timestamp_ns for ev in wire_events), default=0)
+            max_ts = max((ev.timestamp_ns for ev in wire_events), default=min_ts + 1_000_000_000)
+            if max_ts <= min_ts:
+                max_ts = min_ts + 1_000_000_000
+            return RetrievalEnvelope(
+                status="OK",
+                trace_id=tid,
+                truncated=envelope.truncated or (len(wire_events) >= max_events),
+                count=len(wire_events),
+                events=wire_events,
+                data_gaps=envelope.data_gaps,
+                min_ts_ns=min_ts,
+                max_ts_ns=max_ts,
+                scope="full_dataset",
+            )
+
+        # 2. CLI / Worker mode: probe store bounds [min_ts, max_ts]
+        probe = self.retrieve_envelope(src_val, 0, 1000, max_events=1, trace_id=tid)
+        min_ts = probe.min_ts_ns
+        max_ts = probe.max_ts_ns
+
+        # Handle empty store
+        if min_ts is None or max_ts is None or (min_ts == 0 and max_ts == 0 and not probe.events):
+            return RetrievalEnvelope(
+                status="OK",
+                trace_id=tid,
+                truncated=False,
+                count=0,
+                events=[],
+                data_gaps=[],
+                min_ts_ns=0,
+                max_ts_ns=0,
+                scope="full_dataset",
+            )
+
+        # Enforce ordered bounds
+        if min_ts > max_ts:
+            min_ts, max_ts = max_ts, min_ts
+        if min_ts == max_ts:
+            max_ts = min_ts + 1_000_000_000
+
+        CHUNK_WINDOW_NS = 3600 * 1_000_000_000  # 1 hour limit in Java RetrieveRequest
+        span = max_ts - min_ts
+
+        # Fast path: single 1-hour window under max events limit
+        if span <= CHUNK_WINDOW_NS and max_events <= 10000:
+            env = self.retrieve_envelope(src_val, min_ts, max_ts, max_events=max_events, trace_id=tid)
+            truncated = env.truncated or (len(env.events) >= max_events)
+            events = env.events[:max_events]
+            return RetrievalEnvelope(
+                status="OK",
+                trace_id=tid,
+                truncated=truncated,
+                count=len(events),
+                events=events,
+                data_gaps=env.data_gaps,
+                min_ts_ns=min_ts,
+                max_ts_ns=max_ts,
+                scope="full_dataset",
+            )
+
+        # Chunked retrieval across spans > 1 hour or requests > 10000 events
+        all_events: list[TelemetryEventWire] = []
+        seen_keys: set[tuple[int, int]] = set()
+        all_data_gaps: list[DataGapWire] = []
+        curr_start = min_ts
+        truncated = False
+
+        while curr_start < max_ts and len(all_events) < max_events:
+            curr_end = min(curr_start + CHUNK_WINDOW_NS, max_ts)
+            if curr_end <= curr_start:
+                curr_end = curr_start + 1
+
+            chunk_max = min(max_events - len(all_events), 10000)
+            chunk_env = self.retrieve_envelope(
+                src_val,
+                curr_start,
+                curr_end,
+                max_events=chunk_max,
+                trace_id=tid,
+            )
+
+            for ev in chunk_env.events:
+                dedup_key = (ev.source_id, ev.timestamp_ns)
+                if dedup_key not in seen_keys:
+                    seen_keys.add(dedup_key)
+                    all_events.append(ev)
+                    if len(all_events) >= max_events:
+                        truncated = True
+                        break
+
+            if chunk_env.data_gaps:
+                all_data_gaps.extend(chunk_env.data_gaps)
+
+            if chunk_env.truncated and len(all_events) >= max_events:
+                truncated = True
+                break
+
+            curr_start = curr_end
+
+        truncated = truncated or (len(all_events) >= max_events)
+        if len(all_events) > max_events:
+            all_events = all_events[:max_events]
+
+        return RetrievalEnvelope(
+            status="OK",
+            trace_id=tid,
+            truncated=truncated,
+            count=len(all_events),
+            events=all_events,
+            data_gaps=all_data_gaps,
+            min_ts_ns=min_ts,
+            max_ts_ns=max_ts,
+            scope="full_dataset",
+        )

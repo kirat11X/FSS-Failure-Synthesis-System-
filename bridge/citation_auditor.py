@@ -178,33 +178,106 @@ class CitationAuditor:
         self,
         synthesis: dict[str, Any],
         evidence: dict[str, Any],
-        knowledge: list[dict[str, Any]] | None = None,
+        knowledge: list[dict[str, Any]] | dict[str, Any] | None = None,
         query: str = "",
         *,
         auto_refine: bool = True,
+        vendor_manual_matches: list[dict[str, Any]] | None = None,
+        error_catalog: list[dict[str, Any]] | dict[str, Any] | None = None,
     ) -> ValidationReport:
         """Run the complete 4-tier citation and warrant audit."""
         events = evidence.get("events", [])
         known_events = {e["event_id"]: e for e in events}
-        known_docs = set()
+        known_docs: set[str] = set()
+        known_errs: set[str] = set()
+
+        def _register_doc(val: Any) -> None:
+            if not val:
+                return
+            s = str(val).strip()
+            known_docs.add(s)
+            if s.startswith("doc-"):
+                known_docs.add(s[4:])
+            else:
+                known_docs.add(f"doc-{s}")
+
+        def _register_err(val: Any) -> None:
+            if not val:
+                return
+            s = str(val).strip()
+            known_errs.add(s)
+            if s.startswith("err-"):
+                known_errs.add(s[4:])
+            else:
+                known_errs.add(f"err-{s}")
+
         if knowledge:
             if isinstance(knowledge, dict):
                 for k, v in knowledge.items():
-                    known_docs.add(str(k))
+                    _register_doc(k)
                     if isinstance(v, dict):
-                        if v.get("chunk"):
-                            known_docs.add(str(v["chunk"]))
-                        if v.get("id"):
-                            known_docs.add(str(v["id"]))
+                        _register_doc(v.get("chunk"))
+                        _register_doc(v.get("id"))
+                        _register_doc(v.get("cite_id"))
+                        if v.get("kind") in ("error_code", "vendor_manual") or str(v.get("id", "")).startswith("err-"):
+                            _register_err(v.get("id"))
+                            _register_err(v.get("code"))
             elif isinstance(knowledge, (list, tuple, set)):
                 for k in knowledge:
                     if isinstance(k, dict):
-                        if k.get("chunk"):
-                            known_docs.add(str(k["chunk"]))
-                        if k.get("id"):
-                            known_docs.add(str(k["id"]))
+                        _register_doc(k.get("chunk"))
+                        _register_doc(k.get("id"))
+                        _register_doc(k.get("cite_id"))
+                        if k.get("kind") in ("error_code", "vendor_manual") or str(k.get("id", "")).startswith("err-"):
+                            _register_err(k.get("id"))
+                            _register_err(k.get("code"))
                     elif isinstance(k, str):
-                        known_docs.add(k)
+                        _register_doc(k)
+
+        # Register vendor manual matches and error catalogs
+        raw_vendor_matches = list(vendor_manual_matches or [])
+        if evidence.get("vendor_manual_matches"):
+            raw_vendor_matches.extend(evidence["vendor_manual_matches"])
+        if evidence.get("vendor_matches"):
+            raw_vendor_matches.extend(evidence["vendor_matches"])
+
+        raw_catalogs = []
+        if error_catalog:
+            raw_catalogs.append(error_catalog)
+        if evidence.get("error_catalog"):
+            raw_catalogs.append(evidence["error_catalog"])
+
+        for ec in raw_catalogs:
+            if isinstance(ec, list):
+                raw_vendor_matches.extend(ec)
+            elif isinstance(ec, dict):
+                if "errors" in ec and isinstance(ec["errors"], list):
+                    raw_vendor_matches.extend(ec["errors"])
+                else:
+                    for k, v in ec.items():
+                        _register_err(k)
+                        if isinstance(v, dict):
+                            _register_err(v.get("id"))
+                            _register_err(v.get("code"))
+
+        for vm in raw_vendor_matches:
+            if isinstance(vm, dict):
+                _register_err(vm.get("id"))
+                _register_err(vm.get("err_id"))
+                _register_err(vm.get("code"))
+                _register_err(vm.get("error_code"))
+                _register_err(vm.get("doc_chunk_id"))
+                _register_doc(vm.get("doc_chunk_id"))
+                _register_doc(vm.get("id"))
+                for a in vm.get("aliases", []):
+                    _register_err(a)
+                subsys = vm.get("subsystem") or vm.get("subsys")
+                code = vm.get("code") or vm.get("ecode") or vm.get("error_code")
+                if subsys is not None and code is not None:
+                    _register_err(f"err-subsys-{subsys}-code-{code}")
+                    _register_err(f"err-{subsys}-{code}")
+            elif isinstance(vm, str):
+                _register_err(vm)
 
         sources = sorted(evidence.get("sources", []))
         evidence_gaps = evidence.get("data_gaps", [])
@@ -239,21 +312,25 @@ class CitationAuditor:
             token = match.group(1).strip()
             if token in IGNORED_BRACKETS or token.startswith("GAP:"):
                 continue
-            # If it's a citation attempt (starts with ev-, drone-, source-, event- or in known_events/docs)
+            # If it's a citation attempt (starts with ev-, drone-, source-, event-, ev_, doc-, err- or in known_events/docs/errs)
             if (
-                token.startswith(("ev-", "drone-", "source-", "event-", "ev_", "doc-"))
+                token.startswith(("ev-", "drone-", "source-", "event-", "ev_", "doc-", "err-"))
                 or token in known_events
                 or token in known_docs
+                or token in known_errs
                 or HEX_EVENT_ID_REGEX.match(token)
             ):
                 candidate_cites.add(token)
 
         for cid in sorted(candidate_cites):
-            # Must be valid hex event ID in known_events, OR valid knowledge doc chunk/ID
-            if cid in known_events and HEX_EVENT_ID_REGEX.match(cid):
+            # Must be valid hex event ID in known_events, OR valid knowledge doc chunk/ID, OR valid error code
+            if cid in known_events and (HEX_EVENT_ID_REGEX.match(cid) or cid.startswith("ev-span-") or cid.startswith("ev-")):
                 if cid not in valid_citations:
                     valid_citations.append(cid)
             elif cid in known_docs:
+                if cid not in valid_citations:
+                    valid_citations.append(cid)
+            elif cid in known_errs:
                 if cid not in valid_citations:
                     valid_citations.append(cid)
             else:
@@ -679,11 +756,20 @@ _default_auditor = CitationAuditor()
 def validate_synthesis(
     synthesis: dict[str, Any],
     evidence: dict[str, Any],
-    knowledge: list[dict[str, Any]] | None = None,
+    knowledge: list[dict[str, Any]] | dict[str, Any] | None = None,
     query: str = "",
+    vendor_manual_matches: list[dict[str, Any]] | None = None,
+    error_catalog: list[dict[str, Any]] | dict[str, Any] | None = None,
 ) -> ValidationReport:
     """Public validator entrypoint conforming to FSS specification."""
-    return _default_auditor.audit(synthesis, evidence, knowledge=knowledge, query=query)
+    return _default_auditor.audit(
+        synthesis,
+        evidence,
+        knowledge=knowledge,
+        query=query,
+        vendor_manual_matches=vendor_manual_matches,
+        error_catalog=error_catalog,
+    )
 
 
 # Backward-compatible aliases
