@@ -1,0 +1,623 @@
+Failure Synthesis System Engineering Audit, Bug-Surface Analysis, and Production Hardening Blueprint
+
+Direct inspection and live runtime testing of kirat11X/FSS-Failure-Synthesis-System- and kirat11X/Failure-Synthesis-System (including commit 4a4f568 on branch integration-bridge) could not be executed in this review because both GitHub repository endpoints were inaccessible—typically indicating private repository settings or access restrictions—and no local working tree is attached to this environment. Rather than speculating about uninspected code lines, this audit and same-day implementation blueprint grounds every diagnosis strictly in the components, interfaces, and fixes documented in commit 4a4f568 (bridge/java_retriever.py, the Java BlockStore 64KB storage layer, streamlit_app.py, app.py, sitecustomize.py, .streamlit/config.toml, start_all.sh, and RUNBOOK.md), combined with primary JVM, Linux kernel, Python, Streamlit, and 2023–2026 NLP/RCA engineering research.
+
+Commit 4a4f568 cleared several first-order integration blockers—dynamic root discovery via findProjectRoot(), JVM stdout JSON metadata extraction, unsigned 64-bit comparisons in findMinTs(), 0-event retrieval handling, malformed citation rejection ([ev-fake], [drone-298]), and app.py delegation—yet eight high-severity defect surfaces remain structurally latent across the two layers you prioritized for editing: the Java–Python integration bridge and the Python application, RAG, and verification stack. On the integration boundary, one-shot subprocess invocations over OS pipes risk silent 64KB kernel pipe deadlocks, orphaned JVMs after timeouts, uint64 sign-inversion and IEEE 754 2^53 nanosecond precision collisions in browser JavaScript, and file-corruption races if Linux flock and Java FileChannel.lock (fcntl) locks ever collide on 64KB BlockStore files. Inside the Python stack, a repo-root sitecustomize.py risks silent Linux distribution shadowing or opaque startup failures, bare module-import delegation in app.py can blank the Streamlit interface on the first widget rerun, PyTorch imports conflict with Streamlit's default file watcher on torch.classes, Ollama's default 4,096-token context window (on GPUs under 24 GiB VRAM) silently drops FSS prompt content with HTTP 200, Qwen3 models enter endless repetition loops under greedy decoding and still answer 40.7%–64.3% of unanswerable queries despite refusal prompts, and syntactic citation-ID validators have 0% sensitivity by construction to semantic "citation laundering".
+
+The summary matrix below maps each of these eight defect surfaces across your commit 4a4f568 footprint to concrete edits you can implement today without mutating the completed Java BlockStore core.
+
+Component (4a4f568)
+
+Latent Bug / Production Risk
+
+Root Technical Cause
+
+Implement-Today Remediation
+
+bridge/java_retriever.py
+
+Silent hang on payloads >64KB; orphan JVM processes after timeout
+
+Linux kernel pipe buffers hold ~64KB; Popen.wait() deadlocks on unconsumed pipes; TimeoutExpired does not kill the child
+
+Use communicate(timeout=...) (or concurrent drain threads), start_new_session=True, process-group termination + post-timeout communicate(), explicit UTF-8 decoding, and separate stdout/stderr
+
+bridge/java_retriever.py to JVM stdout
+
+Parser desynchronization from JVM notices or stray logs
+
+JAVA_TOOL_OPTIONS / _JAVA_OPTIONS banners (on older/unpatched JDKs) or stray System.out writes corrupt unframed streams
+
+Reserve stdout strictly for single-line NDJSON or Content-Length-framed JSON-RPC 2.0; validate payloads with Pydantic v2 TypeAdapter
+
+findMinTs() to JSON to streamlit_app.py
+
+Negative timestamps (≥ 2^63) and 256 ns rounding collisions in UI
+
+Java long serializes signed by default; browser JS Number (RFC 8259 §6) loses integer precision above 2^53 - 1
+
+Emit Long.toUnsignedString(ts) as base-10 JSON strings; parse to Python int for sorting/windowing; render stringified timestamps in Streamlit tables/JSON
+
+Java BlockStore (64KB blocks)
+
+Concurrent write corruption or OverlappingFileLockException
+
+Linux flock(2) and fcntl(2) locks do not interact locally; Java FileChannel.lock() is JVM-wide rather than per-thread
+
+Keep Java as the sole writer; pair an in-JVM ReentrantReadWriteLock with FileChannel.lock() in try-with-resources + force(true)
+
+sitecustomize.py
+
+Silent import bypass or mysterious startup crash across hosts
+
+Global distro sitecustomize.py can shadow local files; -S/-P/-I flags skip it; non-ImportError exceptions fail silently
+
+Replace with pyproject.toml + pip install -e . inside your venv; launch strictly via python -m streamlit run
+
+app.py and streamlit_app.py
+
+Blank screen on first rerun; crashes on concurrent tabs; torch.classes error
+
+Top-level import streamlit_app caches in sys.modules; global @st.cache_resource is shared across threads; file watcher inspects torch.classes
+
+Invoke an explicit streamlit_app.main() from app.py (or use st.navigation); wrap shared clients in a mutex (threading.Lock); set fileWatcherType = "none"
+
+Local LLM Synthesis (Qwen / Ollama / llama.cpp)
+
+Silent prompt truncation; endless <think> loops; unparseable 8-part output
+
+Ollama defaults to 4K num_ctx (<24 GiB VRAM) and silently drops oldest tokens with HTTP 200; Qwen3 loops under greedy decoding
+
+Enforce num_ctx ≥ 16384 via OLLAMA_CONTEXT_LENGTH or llama-server; use non-greedy Qwen3 sampling + think-budget guard + grammar-constrained JSON
+
+Domain RAG, Data Gaps, and Citation Validator
+
+Missed error codes; 40.7%–64.3% unanswerable-query hallucinations; citation laundering
+
+Vector-only RAG blurs alphanumeric IDs; Qwen3 generators fail to abstain reliably; regex checks have 0% sensitivity to relation/modality/scope overclaims
+
+Deploy BM25S + Dense + RRF (k = 60) + local reranker; add pre-generation sufficiency gate; run 4-tier citation + warrant-strength verification
+
+Target Architecture for the Hardened Java–Python Pipeline
+
+To eliminate cross-language fragility while honoring your zero-core-mutation constraint on the Java storage engine, the system should enforce five strict architectural boundaries: browser presentation (Streamlit), thread-safe Python orchestration, a schema-validated IPC bridge, single-writer Java BlockStore persistence, and a gated synthesis-and-verification pipeline.
+
+This separation narrows the failure domain of every component. In commit 4a4f568, streamlit_app.py drives JavaRetriever directly during interactive widget reruns, coupling UI rendering, subprocess spawning, BlockStore persistence, RAG retrieval, LLM decoding, and citation validation inside the same session thread. Placing strict contracts around the IPC transport, single-writer Java persistence, mutex-protected local model inference, and pre- and post-generation epistemic gates ensures that any fault degrades into an explicit typed state (EMPTY, INSUFFICIENT_EVIDENCE, TIMEOUT, FORCE_OVERCLAIM) rather than a silent deadlock, corrupted block, or hallucinated root cause.
+
+Hardening the Java–Python Integration Bridge
+
+Because your Java core is complete and verified against zero core mutations, the integration boundary (bridge/java_retriever.py and the Java CLI or worker wrapper invoking BlockStore) carries the highest concentration of OS-level failure modes. Five concrete hazards merit immediate attention.
+
+Subprocess Deadlocks, the 64KB Pipe Wall, and Orphan Process Cleanup
+
+When Python spawns a JVM through subprocess.Popen(..., stdout=PIPE, stderr=PIPE)—or when Java invokes child commands through ProcessBuilder—the Linux kernel creates separate in-memory pipe buffers for STDOUT (FD 1) and STDERR (FD 2), each capped at approximately 64KB on modern Linux systems. Because your BlockStore persists data in 64KB blocks, even a single verbose telemetry response, block dump, or Java stack trace alongside JSON metadata can fill a pipe buffer completely. Once full, the kernel suspends the writing child mid-execution until the parent reads from the pipe; if the parent calls Popen.wait() in Python or Process.waitFor() in Java before draining both pipes concurrently, both processes deadlock indefinitely without raising an exception or stack trace.
+
+Official Python subprocess documentation highlights four additional lifecycle bugs that directly threaten bridge/java_retriever.py inside a multithreaded Streamlit server. First, when proc.communicate(timeout=...) raises TimeoutExpired, Python does not automatically kill the child process; the caller must terminate the child and invoke a second proc.communicate() (with no input) to drain remaining pipe data and reap the process exit status, and must never call proc.wait() after a timeout (as full pipe buffers can also block wait() in asynchronous subprocess wrappers even after a termination signal). Second, passing preexec_fn (such as preexec_fn=os.setsid) is explicitly documented as not safe in multithreaded applications—and Streamlit runs concurrent server, script, and worker threads—because it can deadlock the child before exec. Replace any preexec_fn calls with start_new_session=True (POSIX, Python 3.2+) or process_group=0 (Python 3.11+) so timeout handlers can cleanly signal the entire child process group (SIGTERM, brief grace wait, then SIGKILL) and prevent orphaned grandchildren.
+
+Third, enabling text=True (or universal_newlines=True) without specifying encoding falls back to locale.getpreferredencoding(False), creating silent Unicode decode failures across differing container or shell locales. Always read raw binary streams (text=False) and decode explicitly as strict UTF-8 (matching RFC 8259 §8.1's UTF-8 mandate for JSON interchange), paired with -Dfile.encoding=UTF-8 on the JVM invocation. Fourth, because communicate() buffers the entire child output in memory, enforce a strict byte ceiling on bounded retrieval responses, resolve the java executable explicitly via shutil.which("java") (or $JAVA_HOME/bin/java) rather than shell=True, wrap all Java process streams in try-with-resources to prevent file-descriptor leakage against ulimit -n caps, and traverse Java 9+ ProcessHandle.descendants() if Java itself spawns helper subprocesses.
+
+Replacing Stdout Scraping with Framed Wire Protocols and Persistent IPC
+
+Commit 4a4f568 hardened JSON metadata extraction from JVM stdout streams, mitigating immediate crashes from noisy startup lines. Still, scraping raw stdout remains fragile in production environments: setting JAVA_TOOL_OPTIONS or _JAVA_OPTIONS causes many OpenJDK builds (prior to the banner removal introduced in Oracle JDK 8u351+) to print Picked up JAVA_TOOL_OPTIONS: ..., and any merged stderr line or stray System.out.println from a dependency immediately breaks unframed stream parsers.
+
+To harden the wire channel today, keep stderr strictly separated from stdout (never pass stderr=subprocess.STDOUT or Java redirectErrorStream(true) on a machine-readable JSON pipe). Inside the Java wrapper's main(), capture the raw protocol stream on FileDescriptor.out first and reassign System.setOut to System.err so accidental prints can never corrupt the data channel. Over that clean channel, adopt one of two standard framings:
+
+NDJSON (Newline-Delimited JSON): Emit one compact, UTF-8 JSON object per line with no embedded newlines, terminated by \n—the exact stdio transport standardized across the Model Context Protocol (MCP) Python, TypeScript, Go, and C# SDKs.
+
+LSP-Style Content-Length Byte Framing: Emit an ASCII header (Content-Length: <byte_count>\r\n\r\n) followed by exact UTF-8 JSON-RPC 2.0 bytes. If using this format, count UTF-8 bytes rather than character length (mixing them truncates multi-byte telemetry) and cap maximum accepted frame length to prevent memory exhaustion on corrupt headers. Never mix NDJSON and Content-Length framing across client and server, as mismatched framing causes indefinite handshake timeouts.
+
+Beyond wire framing, spawning a fresh JVM on every Streamlit interaction pays repeated classloading and initialization overhead while discarding JIT compilation. Measured JVM startup costs range from ~62 ms for a minimal ~450-class HelloWorld on an M4 MacBook Pro (with verbose trace logging) and 31 ms for HelloStream on JDK 23 (falling 42% to 18 ms with JDK 24 AOT Cache under JEP 483), up to 497–939 ms for a JSON-serving Quarkus sample application in Red Hat's OpenJDK 17 benchmarks (939 ms with -Xshare:off, 869 ms with JDK CDS, and 497 ms with AppCDS + JDK CDS). The table below evaluates the IPC migration options grounded in JVM and Python interoperability documentation.
+
+IPC Architecture
+
+Latency & Warmup Profile
+
+Crash & Memory Isolation
+
+Streamlit / Multi-Tab Fit
+
+Key Operational Caveats
+
+Verdict for FSS
+
+One-Shot subprocess (Current)
+
+High per-call cold start (~60–939 ms depending on classpath); zero JIT warmup
+
+Full OS process isolation
+
+Safe per call once 64KB pipe draining & timeouts are hardened
+
+Repeats JVM startup and BlockStore opens on every query
+
+Viable today after hardening pipes + NDJSON
+
+One-Shot + AppCDS / JDK 24 AOT Cache
+
+20%–42% documented cold-start reduction (JEP 310/483 & Red Hat benchmarks; BellSoft vendor blog cites up to 50%)
+
+Full OS process isolation
+
+High; drop-in JVM flags (-Xshare:auto / -XX:SharedArchiveFile)
+
+Exact JDK build and classpath must match training archive; use -Xshare:auto in production because OS ASLR can cause -Xshare:on to abort
+
+Best zero-code speedup for CLI invocations
+
+Persistent Worker over stdio (NDJSON)
+
+Sub-millisecond IPC; warm JIT & open BlockStore handles
+
+Full OS process isolation; auto-restartable
+
+Needs global threading.Lock in @st.cache_resource to serialize pipe access
+
+Any stray System.out breaks framing; single in-flight call unless multiplexed by request ID
+
+Strongest Sprint 1–2 upgrade (zero sockets/ports)
+
+Persistent Worker over JEP-380 AF_UNIX Socket
+
+Bypasses TCP/IP stack for lower latency & CPU; supports Selector multiplexing
+
+Full OS process isolation; SO_PEERCRED peer credentials
+
+Excellent; supports pooled connections across concurrent Streamlit tabs
+
+Requires JDK 16+; strict ~100-byte socket path cap (use /tmp/fss.sock); stale socket files persist after close and block rebind unless explicitly unlinked
+
+Optimal Production Target for multi-user FSS
+
+Py4J
+
+Higher overhead than JNI/local sockets due to network RPC tunnel
+
+Full process isolation; restartable JVM sessions
+
+Good for RPC, though Java collections are not native Python objects
+
+Native Unix domain sockets still unimplemented (GitHub issue #256 open since 2016, discussed Aug 2025); opens TCP loopback port
+
+Extra dependency overhead vs. JEP-380/NDJSON
+
+JPype (In-Process JNI)
+
+Fast shared-memory JNI access
+
+None — JVM fault crashes Python/Streamlit
+
+Poor — JVM cannot be restarted once stopped in the same Python process
+
+Tight ABI coupling; Streamlit reloads or JVM faults wedge the server
+
+Avoid for interactive Streamlit serving
+
+End-to-End Unsigned 64-Bit Timestamp Integrity From findMinTs to Browser UI
+
+Commit 4a4f568 corrected unsigned 64-bit integer comparisons in findMinTs() (analogous to Long.compareUnsigned), yet fixing Java-side comparison protects only one third of the data path. Two silent corruption bugs persist downstream unless addressed across the wire contract and UI. First, because Java's long primitive is strictly signed (-2^63 to 2^63 - 1), any default JSON numeric serializer or String.valueOf(ts) emits unsigned values ≥ 2^63 as negative integers (2^63 serializes as -9223372036854775808, and 2^64 - 1 serializes as -1). Java must encode all unsigned 64-bit timestamps with Long.toUnsignedString(ts) and parse them with Long.parseUnsignedLong(str).
+
+Second, RFC 8259 Section 6 explicitly warns that JSON numeric literals are only guaranteed interoperable without precision loss inside the IEEE 754 binary64 safe integer range [-(2^53) + 1, (2^53) - 1] (or ±9,007,199,254,740,991). While Python parses arbitrary-precision integers losslessly, Streamlit transmits dataframes (st.dataframe), charts, and JSON views (st.json) into browser JavaScript—where Pandas/NumPy int64 columns can trigger JSON serialization TypeErrors and raw uint64 values silently lose precision beyond 53 bits. Exact IEEE 754 float64 round-trip calculations anchored to November 20, 2026 (01:51:00 UTC) verify where timestamp integrity breaks:
+
+Timestamp / Boundary Value (Nov 20, 2026 UTC)
+
+Exact Unsigned Integer Value
+
+Safe in JS / RFC 8259 §6?
+
+IEEE 754 float64 Round-Trip Error
+
+Default Java Signed long Output
+
+2026 Unix Epoch Seconds
+
+1,795,139,460
+
+Yes
+
+0
+
+1795139460
+
+2026 Unix Epoch Milliseconds
+
+1,795,139,460,000
+
+Yes
+
+0
+
+1795139460000
+
+2026 Unix Epoch Microseconds
+
+1,795,139,460,000,000
+
+Yes
+
+0
+
+1795139460000000
+
+2026 Unix Epoch Nanoseconds (+123456789 ns)
+
+1,795,139,460,123,456,789
+
+No
+
+-21 ns (ULP = 256 ns)
+
+1795139460123456789
+
+JS MAX_SAFE_INTEGER (2^53 - 1)
+
+9,007,199,254,740,991
+
+Yes
+
+0
+
+9007199254740991
+
+Java Long.MAX_VALUE (2^63 - 1)
+
+9,223,372,036,854,775,807
+
+No
+
++1
+
+9223372036854775807
+
+Unsigned 2^63 (High Bit Set)
+
+9,223,372,036,854,775,808
+
+No
+
+0 (exact power of 2)
+
+-9223372036854775808
+
+Unsigned 2^64 - 1 (UINT64_MAX)
+
+18,446,744,073,709,551,615
+
+No
+
++1
+
+-1
+
+At 2026 nanosecond scale (≈ 1.795 × 10^18, binary exponent 2^60 with 52 mantissa bits), the IEEE 754 float64 unit in the last place (ULP) is 2^(60 - 52) = 256 ns. Two distinct telemetry events separated by 100 ns (1795139460123456789 and 1795139460123456889) collapse to the identical JavaScript float 1795139460123456768, silently erasing causal ordering in your FSS timeline UI. To guarantee lossless end-to-end fidelity, serialize every uint64 timestamp as a base-10 JSON string (Long.toUnsignedString), validate and convert it into arbitrary-precision Python int inside Pydantic v2 models for exact sorting and gap math, and pass formatted ISO-8601 plus explicit nanosecond string columns to st.dataframe and st.json.
+
+Concurrency Safety and File Locking on 64KB BlockStore Files
+
+Because streamlit_app.py now persists directly into Java BlockStore 64KB blocks while serving bounded retrievals, concurrent browser sessions—or rapid user clicks under Streamlit's default runner.fastReruns = true—can issue overlapping writes and reads against the same storage files. Three Linux and JVM locking semantics create dangerous corruption traps if mixed improperly. First, since Linux 2.0, BSD flock(2) locks (Python fcntl.flock) and POSIX fcntl(2) record locks (F_SETLK / Java FileChannel.lock()) use completely separate kernel tables that do not interact on local filesystems. If Python acquires flock while Java acquires FileChannel.lock(), neither process blocks the other, permitting interleaved torn writes inside a 64KB block.
+
+Second, Java NIO file locks are held on behalf of the entire JVM, not individual threads. Once you migrate to a persistent multi-threaded Java worker, two threads locking overlapping byte regions of the same BlockStore file will trigger an unchecked OverlappingFileLockException. Third, traditional POSIX fcntl record locks carry a notorious descriptor trap: closing any file descriptor referring to the same file within a process drops all POSIX locks held by that process on that file. (Linux 3.15+ introduced F_OFD_SETLK open-file-description locks to resolve this per-FD issue, and both lock families behave inconsistently across NFS and SMB mounts.)
+
+The cleanest remediation is a strict single-writer ownership invariant: Python must never open BlockStore data files for writing. Inside Java, guard every BlockStore write first with an in-JVM ReentrantReadWriteLock (serializing threads cleanly without OverlappingFileLockException) and then with FileChannel.lock() inside a try-with-resources block, calling fileChannel.force(true) to flush data and metadata before releasing the lock. While running one-shot Python-to-Java CLI spawns during Phase 1, wrap write-capable JavaRetriever calls on the Python side with both a global threading.Lock (cached via @st.cache_resource) and an exclusive lock on a separate sidecar .lock file using fcntl.lockf (which wraps POSIX fcntl record locking on Linux).
+
+Cross-Language Contract Validation and Trace Propagation
+
+To stop subtle schema drift or 0-event edge cases from surfacing as opaque UI KeyError crashes, lock down a versioned JSON Schema (Draft 2020-12) wire contract using Pydantic v2 (BaseModel.model_json_schema() and TypeAdapter.validate_json() powered by compiled pydantic-core). Model legitimate 0-event retrievals as an explicit typed envelope (status: Literal["OK", "EMPTY", "ERROR"], events: list[TelemetryEvent], data_gaps: list[DataGap]) rather than overloading None or empty dictionaries. For cross-process observability, bind a W3C-compatible 32-hex-character trace_id per query in Python via structlog.contextvars.bind_contextvars(trace_id=...) (or OpenTelemetry spans), pass trace_id in the request JSON or FSS_TRACE_ID environment variable to the JVM, and emit trace_id on every Java stderr structured log line and response header so failures can be reconstructed end-to-end across Streamlit, bridge/, and Java.
+
+Refactoring the Python Application, Local LLM Runtime, and RAG Pipeline
+
+The Python layer contains the highest concentration of immediate usability defects—spanning environment bootstrap traps, Streamlit rerun mechanics, silent local-LLM context truncation, and hybrid retrieval blind spots.
+
+Eliminating sitecustomize.py and Fixing Streamlit Lifecycle and Concurrency Bugs
+
+Commit 4a4f568 introduced a repo-root sitecustomize.py for Python path configuration and delegated app.py to streamlit_app.py. Official Python and Streamlit documentation highlights four brittle failure modes across these files that should be refactored immediately.
+
+First, replace sitecustomize.py with an editable package (pyproject.toml). Per Python's official site module documentation, sitecustomize runs during interpreter startup, silently ignores ImportError when name == 'sitecustomize', and causes a silent, mysterious failure of the process on any other exception. Moreover, a repo-root sitecustomize.py only executes if PYTHONPATH places the repo root on sys.path ahead of site initialization, is silently shadowed on Linux distributions that ship a global /usr/lib/python3.X/sitecustomize.py, and is bypassed whenever Python runs with -S, -P, or -I flags or from another working directory. Replacing it with a minimal pyproject.toml and pip install -e . registers bridge cleanly inside your virtual environment and appears transparently in pip freeze. Always launch Streamlit via "$VENV_PYTHON" -m streamlit run app.py rather than a bare streamlit executable, which can silently invoke a global system interpreter outside the active virtual environment.
+
+Second, verify app.py delegation against the Streamlit blank-page rerun trap. Because Streamlit re-executes the target script from top to bottom on every widget click while Python preserves already-imported modules in sys.modules, delegating from app.py via a bare import streamlit_app works only on the initial load—on the first user interaction, Python treats the import as a cached no-op, executes zero st.* UI calls, and renders a blank screen. Since app.py could not be inspected directly, audit it today to confirm that streamlit_app.py exposes an explicit def main() -> None: function invoked on every run by app.py (from streamlit_app import main; main()), or switch to Streamlit's built-in st.navigation([st.Page("streamlit_app.py", title="FSS Dashboard")]).run() router.
+
+Third, prevent the PyTorch torch.classes watcher crash and harden .streamlit/config.toml. Importing PyTorch (via HuggingFace transformers, Sentence-Transformers, or local verifiers) alongside Streamlit's default server.fileWatcherType = "auto" frequently raises Examining the path of torch.classes raised: Tried to instantiate class 'path.path', but it does not exist!. Setting fileWatcherType = "none" in .streamlit/config.toml bypasses this watcher conflict cleanly (Streamlit PR #10388 also targeted this metaclass inspection in newer releases) and avoids wasteful file-watching overhead across model weights. Apply the following hardened .streamlit/config.toml baseline based on official Streamlit configuration documentation:
+
+Ini, TOML
+
+[server]
+
+headless = true
+
+fileWatcherType = "none"
+
+runOnSave = false
+
+enableXsrfProtection = true
+
+maxCacheDataSize = "1gb"
+
+maxUploadSize = 200
+
+[runner]
+
+fastReruns = true
+
+[client]
+
+showErrorDetails = "type"
+
+toolbarMode = "viewer"
+
+[browser]
+
+gatherUsageStats = false
+
+Fourth, guard shared @st.cache_resource singletons with a mutex and protect GPU memory. Official Streamlit docs specify that @st.cache_resource defaults to scope="global", sharing the exact same mutable object concurrently across every user session and script thread. Creating a threading.Lock() at top-level in streamlit_app.py fails because every session rerun constructs a separate lock. Instead, wrap every non-thread-safe resource (local LLM engine, reranker, or persistent JavaRetriever IPC client) inside a ThreadSafeWrapper holding a single shared threading.Lock returned from @st.cache_resource(scope="global", validate=is_healthy, on_release=close_cleanly)—noting that validate and on_release must be synchronous functions and on_release is not guaranteed to run at full app shutdown. Never cache an event-loop-bound async client inside @st.cache_resource, because Streamlit may close event loops across reruns and raise Event loop closed (Streamlit issue #16801). Use @st.cache_data (which returns safe isolated copies) for immutable retrieval snapshots and RAG outputs, wrap PyTorch inference in with torch.inference_mode():, and recover from GPU OOMs gracefully using torch.cuda.empty_cache() (bearing in mind that empty_cache() mitigates fragmentation rather than increasing available VRAM).
+
+Local LLM Inference Hardening: Context Budgeting, Qwen3 Decoding Stability, and Constrained Output
+
+Running an 8-part Root Cause Synthesis prompt locally exposes two quiet failure modes that yield fluent yet invalid diagnoses: silent prompt truncation in Ollama and decoding loops in Qwen3 models. Current Ollama releases choose a default context window (num_ctx) dynamically from detected GPU VRAM: 4,096 tokens under 24 GiB VRAM, 32,768 tokens for 24–48 GiB, and 262,144 tokens for 48 GiB or more (older builds defaulted to 2,048). Crucially, when an FSS prompt overflows num_ctx, Ollama returns HTTP 200 and silently truncates the oldest tokens—dropping system instructions, epistemic rules, or early causal telemetry without emitting a warning—whereas llama.cpp (llama-server) fails fast with HTTP 400 exceed_context_size_error.
+
+To quantify this headroom risk for your 8-part synthesis prompt, an illustrative token-budget model (assuming 850 tokens for system/schema instructions, 1,200 tokens for top-5 Domain RAG chunks, 300 tokens for Data Gaps and question framing, 45 tokens per structured timeline event, and 1,200 non-thinking vs. 3,200 thinking output tokens) shows why 4,096 tokens breaks immediately.
+
+In addition to sizing num_ctx ≥ 16384 (and verifying with a Python pre-flight token budget guard before every call), watch out for two documented Ollama configuration traps. First, OLLAMA_NUM_CTX is not a real Ollama setting—direct testing on Ollama 0.34.1 confirmed that the server ignores unrecognized environment variables silently; the real server variable is OLLAMA_CONTEXT_LENGTH=16384, which on systemd Linux services must be configured via sudo systemctl edit ollama rather than an interactive shell export. Second, Ollama's OpenAI-compatible /v1/chat/completions endpoint silently drops num_ctx from request JSON payloads (openai/openai.go has no field for it); you must configure context via OLLAMA_CONTEXT_LENGTH, a custom Modelfile (PARAMETER num_ctx 16384), or Ollama's native /api/chat (options.num_ctx), and avoid oscillating num_ctx between requests because changing it forces a multi-second model reload. Always inspect the live effective window in the CONTEXT column of ollama ps.
+
+If your synthesis layer runs Qwen3 (or upgrades from Qwen2.5), four inference controls eliminate repeating-token hangs and malformed outputs. First, never use greedy decoding (do_sample=False / temperature=0) when Qwen3 Thinking Mode (enable_thinking=True) is active: official Qwen3 documentation warns that greedy decoding in thinking mode causes performance degradation and endless repetition loops, and independent testing on Qwen3.5 (0.8B/2B/4B) reproduced infinite unclosed <think> loops even under pinned llama.cpp. Use Qwen3's documented sampling defaults (temperature=0.6, top_p=0.95, top_k=20, min_p=0, with optional presence_penalty up to 1.5–2.0 if loops persist) for thinking mode, or disable thinking via the hard switch (enable_thinking=False) with temperature=0.7, top_p=0.8, top_k=20, min_p=0 for lower-latency structured synthesis. Second, implement Qwen's official bounded think-budget guard: parse closing thinking token ID 151668 (</think>) and end-of-message token ID 151645 (<|im_end|>); if Phase 1 decoding hits thinking_budget (recommended > 1,024 tokens in production) without emitting 151668, append the early-stopping string "\n\nConsidering the limited time by the user, I have to give the solution based on the thinking directly now.\n</think>\n\n", surface an explicit reasoning_truncated: true status in the UI rather than failing silently, and decode the final answer within the remaining token budget.
+
+Third, guard against HuggingFace transformers GenerationConfig edge cases: passing do_sample=False alongside temperature=0.0 triggers UserWarning or division-by-zero ValueError in transformers >= 4.46, whereas some Qwen model cards ship generation_config.json files specifying sampling parameters without do_sample: true, causing transformers to silently ignore temperature/top_p/top_k and decode greedily. Always pass do_sample=True explicitly when sampling, or unset sampling parameters when deliberately decoding greedily in non-thinking mode. Fourth, compile your Pydantic v2 8-part output schema into decode-time grammar masks using llama-server's json_schema / GBNF support or XGrammar / XGrammar-2 (integrated into vLLM and SGLang). XGrammar achieves up to 100x mask-generation speedup (and up to 5x time-per-output-token improvement in vLLM according to BentoML's engineering benchmarks), while XGrammar-2 (ACM CAIS '26) introduces TagDispatch—allowing free-form <think>...</think> reasoning followed automatically by grammar-constrained JSON—with over 6x faster compilation and near-zero serving overhead. When serving through llama-server, enable host-memory prefix caching (--cram 256 --system-prompt-file ./fss_system.txt --cache-prompt --cache-type-k q8_0, noting that without --kv-unified, --ctx-size splits across --np slots); a llama.cpp community benchmark (#20574) reported a 93% TTFT reduction (4.3 s down to 0.3 s) for cached prefixes, provided you keep the system prompt byte-identical across queries by never injecting dynamic timestamps or trace_id values ahead of it.
+
+Upgrading Domain Knowledge RAG and Applying Empirical RCA Findings
+
+Vector-only retrieval reliably underperforms on technical failure diagnostics because dense embeddings blur exact alphanumeric identifiers, error codes, and sensor IDs—for example, ranking a generic payment-failure article above the exact runbook for "ERR-482", or conflating "PROD-SKU-7842X" with "PROD-SKU-7842Y". Conversely, lexical search alone misses paraphrases such as matching "stop invoices renewing" against "cancel recurring billing". Upgrading FSS's Domain Knowledge RAG to a lightweight local hybrid retrieval plus reranking pipeline addresses both blind spots without external API dependencies.
+
+For the lexical leg, replace standard pure-Python BM25 (rank-bm25) with bm25s (arXiv:2407.03618), which eagerly precomputes sparse BM25 score matrices in NumPy/SciPy for up to a 500x speedup over rank-bm25, supports exact Lucene, Robertson, BM25+, and BM25L scoring variants, adds under 100KB on disk beyond NumPy/SciPy, and supports memory-mapped indexes that cut RAM usage by over 50% on multi-million-document corpora. One subtle implementation caveat: if JAX is installed in your GPU virtual environment, importing bm25s probes JAX top-k and can trigger GPU VRAM preallocation—set os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false" prior to importing bm25s. Pair bm25s with a compact local instruction-aware embedding model such as Qwen3-Embedding-0.6B (Apache 2.0, 32K context, configurable MRL dimensions), and merge the lexical and dense rankings using Reciprocal Rank Fusion (RRF):
+
+$$\text{RRF\_score}(d) = \sum_{l \in \{\text{BM25}, \text{Dense}\}} \frac{1}{k + \text{rank}_l(d)}$$
+
+Start with the standard default k = 60 (from Cormack, Clarke, and Büttcher, 2009; also default in Elasticsearch and Milvus, whereas Qdrant defaults to k = 2), which promotes passages appearing near the top of both lists rather than letting a single-list outlier dominate. Re-score the fused top-50 candidate shortlist down to the final top-5–8 passages with a local cross-encoder reranker—noting that a reranker only helps when target passages already appear in the candidate pool, so verify candidate recall first. The comparison below summarizes local open-weight reranker scores reported in the Qwen team's vendor benchmark (evaluated over top-100 candidates from Qwen3-Embedding-0.6B):
+
+Local Reranker Model
+
+Params
+
+Context Window
+
+MTEB-R (Eng v2)
+
+MTEB-Code
+
+Practical Notes for Local FSS
+
+Qwen3-Reranker-0.6B
+
+0.6B
+
+32K
+
+65.80
+
+73.42
+
+Apache 2.0; instruction-aware; strongest accuracy-per-VRAM in sub-1B tier (vendor benchmark)
+
+Qwen3-Reranker-4B
+
+4B
+
+32K
+
+69.76
+
+81.20
+
+High accuracy option for 24+ GiB workstations (vendor benchmark)
+
+gte-multilingual-reranker-base
+
+0.3B
+
+—
+
+59.51
+
+54.18
+
+Compact multilingual option
+
+Jina-multilingual-reranker-v2-base
+
+0.3B
+
+—
+
+58.22
+
+58.98
+
+Compact 0.3B cross-encoder
+
+BGE-reranker-v2-m3
+
+0.6B
+
+—
+
+57.03
+
+41.38
+
+Mature ecosystem; community user reports ~0.5 s CPU latency on Apple M1
+
+Empirical software-failure benchmarks reinforce why bounded context curation and historical exemplars matter more than dumping larger telemetry dumps into the prompt. In OpenRCA (ICLR 2025), even a specially designed RCA agent backed by Claude 3.5 localized only 11.34% of complex software failure root causes. Conversely, Microsoft's RCACopilot (EuroSys '24, evaluated across 653 production cloud incidents) established two directly transferable lessons for FSS. First, redundant telemetry degrades diagnosis: appending raw AlertInfo and ActionOutput onto DiagnosticInfo dropped Micro-F1 from 0.689 down to 0.430–0.525, whereas feeding condensed diagnostic summaries boosted Micro-F1 to 0.766 (Macro-F1 0.533). Second, historical incident retrieval is decisive: zero-shot classification collapsed to 0.026 Micro-F1 (0.004 Macro-F1), whereas retrieving K = 3–15 similar resolved incidents as few-shot Chain-of-Thought exemplars drove RCACopilot's 0.766 peak and enabled it to coin accurate novel categories (predicting "I/O Bottleneck" for an unseen "DiskFull" incident) rather than forcing wrong legacy labels. Indexing resolved past FSS incidents alongside static domain runbooks in your bm25s + dense store offers one of the highest accuracy returns available today.
+
+Elevating Data-Gap Quarantine and Epistemic Citation Validation Beyond Regex
+
+Your 8-part dashboard design is already well structured around separating Timeline & Epistemic Tags, Data Gaps Quarantine, and Validation Badges. However, 2024–2026 attribution studies demonstrate that two structural gaps remain whenever an application relies on LLM prompt instructions to honor missing data and regex patterns to validate citations.
+
+Closing the Abstention Gap With Pre-Generation Sufficiency Gating
+
+Peer-reviewed evidence from Sufficient Context (ICLR 2025) and recent experimental findings from RINSE: Relevance Is Not Sufficient Evidence (preprint arXiv:2609.37469, September 2026) demonstrate that language models consistently fail to abstain reliably when retrieved evidence is insufficient—even when explicitly instructed to reply "unanswerable". Rather than flagging missing causal links, generators bridge telemetry gaps using stale parametric knowledge or plausible confabulation.
+
+Two architectural rules follow directly for FSS's Data Gaps Quarantine stage. First, enforce a deterministic short-circuit ahead of neural scoring: whenever JavaRetriever returns a legitimate 0-event envelope (status == "EMPTY") or detects unrecorded time gaps spanning the requested failure window, bypass LLM synthesis immediately—or trigger an explicit scope-widening retry akin to RCACopilot's scope-switching handler action—and render a structured INSUFFICIENT_EVIDENCE quarantine card rather than letting the generator improvise. Second, when events are present, insert a lightweight pre-generation sufficiency scorer modeled on RINSE's three complementary checks (question content coverage, RoBERTa-base candidate span detection, and cross-passage latent sufficiency with a ≤1.5B model; 36.5 ms median GPU latency and 0.813 Pairwise Accuracy on real BM25 + e5-base-v2 retrieval outputs). As formalized in TRUST-ALIGN (ICLR 2025), separating sufficiency detection from generation prevents the classic prompt-tuning trap visible across every Qwen3 size—simultaneously over-answering 40.7%–64.3% of unanswerable prompts while falsely refusing 11.3%–29.7% of answerable ones.
+
+Defeating Citation Laundering With Four-Tier Verification and Evidence-Force Calibration
+
+Commit 4a4f568 expanded your citation validator to catch fabricated or malformed tags such as [ev-fake] and [drone-298]. Under the OWASP AI Security Verification Standard (AISVS C07-04) and ForceBench (Findings of EMNLP 2026), syntactic ID validation forms Tier 1 only. Even when every cited ID legitimately exists in the Java BlockStore retrieval set and matches the query topic, LLMs routinely commit citation laundering: citing a real, topically relevant record as warrant for an over-strong claim. In root-cause synthesis, the sharpest failure mode is Relation escalation—citing two temporally proximate [OBSERVED] events and asserting "Event A caused Failure B" without causal support.
+
+To elevate FSS Validation Badges from regex checks to full epistemic auditing, implement a four-tier verification pipeline grounded in OWASP AISVS C07-04, ALCE/ALiiCE, ForceBench, and empirical citation-paradigm evaluations.
+
+Tier 1 — Metadata-Derived ID Integrity and Entity Binding (Deterministic, <5 ms): Verify that every bracketed citation resolves strictly to an event or runbook ID emitted by JavaRetriever or the hybrid RAG layer rather than parametric memory, enforce mandatory paragraph-level citation coverage per AISVS Requirement 7.4.2, and execute a deterministic entity-binding check verifying that the subsystem, host, or sensor named in each claim matches the primary entity in the cited record—catching "deceptive grounding" where valid telemetry from Component Y is misattributed to queried Component X.
+
+Tier 2 — Post-Hoc Attribution Refinement (P-Cite and VeriCite): Comparative evaluation across ALCE and LongBench-Cite (arXiv:2509.21557) found that Post-hoc citation (P-Cite) achieves substantially higher coverage and accuracy on multi-source synthesis than generation-time citation (G-Cite)—reaching 75% coverage and 42% correctness on ALCE versus 37% coverage and 21% correctness for G-Cite, alongside higher human-evaluated answer correctness (78% vs. 69%) and lower citation hallucination (37% vs. 41%). (G-Cite excelled only on single-claim precision in FEVER at 94% correctness with 27% coverage, whereas P-Cite maintained balanced 74% coverage and 75% correctness.) Adopting the three-stage VeriCite flow referenced in OWASP AISVS Requirement 7.4.3—initial synthesis, claim-level evidence verification and selection, and bounded refinement (or abstention after failed retries)—combines broad coverage with strict attribution enforcement.
+
+Tier 3 — Atomic Claim Entailment With Calibration Caveats: Decompose synthesis findings into atomic claims (following FActScore and ALiiCE) and check each claim against its cited records with a compact local verifier—such as MiniCheck-Flan-T5-Large (770M parameters), HHEM-2.1-Open (110M parameters), or a HaluGate-style token-detector plus NLI cascade (76–162 ms). Important counter-evidence caveat: Both FaithJudge (EMNLP 2025 Industry) and a 2026 vendor evaluation by Blue Guardrails on medical RAG documents reported significant limitations in standalone NLI detectors—with Blue Guardrails measuring just 53.6%–62.3% message-level accuracy and 22%–24% claim-level F1 across MiniCheck, Vectara, RAGAS, and cloud guardrails because SNLI-trained models exploit surface negation cues and naive sentence splitting destroys cross-sentence context. Keep surrounding sentence context intact when evaluating claims, treat Tier 3 as a triage signal rather than an infallible oracle, and follow production evaluation guidance (such as FutureAGI's hallucination playbook) by never allowing the generator model to judge its own output, as same-family judging systematically under-reports subtle date, numeric, and citation errors.
+
+Tier 4 — Evidence-Force Calibration Gate (claim_force(c) ≤ evidence_force(e)): Audit atomic claim-evidence pairs using an explicit warrant-strength prompt (backed by deterministic lexical checks on epistemic tags) targeting all five ForceBench escalation axes:
+
+ForceBench Axis
+
+Failure-Synthesis Overclaim Pattern to Flag
+
+Deterministic / Auditor Check for FSS
+
+Relation
+
+Asserting caused, triggered, or proved from correlated events
+
+Flag causal verbs whenever cited records carry only [OBSERVED] / [CORRELATED] tags without an explicit causal runbook link
+
+Modality
+
+Asserting definitely, confirmed, or guaranteed from tentative signals
+
+Compare claim certainty markers against source hedging or incomplete diagnostics
+
+Scope
+
+Generalizing a single node, partition, or sensor fault to the entire fleet
+
+Cross-check entity scope identifiers between claim subjects and cited event metadata
+
+Temporal
+
+Stating a historical anomaly as an ongoing or timeless system state
+
+Verify verb tense against the bounded JavaRetriever start/end window
+
+Numeric
+
+Reporting an exact point value from ranged, approximate, or bounded telemetry
+
+Reject exact-point assertions when cited telemetry or RAG specs report intervals/bounds
+
+Map the four-tier pipeline output onto five unambiguous Streamlit Validation Badges: VERIFIED_SUPPORTED (Tiers 1–4 pass), FORCE_OVERCLAIM (Tiers 1–3 pass, Tier 4 warrant escalation flagged), ENTITY_MISMATCH (Tier 1 entity-binding failure), UNGROUNDED_HALLUCINATION (Tier 1 or Tier 3 failure triggering up to two bounded regenerations per AISVS Req 7.4.2), and INSUFFICIENT_EVIDENCE (Stage 0 sufficiency gate or 0-event abstention).
+
+Operational Readiness: Launcher Hardening, Verification Suite, and Phased Rollout
+
+To verify that every layer on your local integration-bridge checkout operates cleanly without silent regressions, pair the Python and bridge refactors with defensive launcher controls, property-based testing, and dual-runtime CI.
+
+Hardening start_all.sh and RUNBOOK.md
+
+Configure start_all.sh with set -euo pipefail and enforce three operational guarantees on startup and shutdown:
+
+Strict Pre-Flight Gatekeeping: Validate $JAVA_HOME/bin/java (requiring JDK 16+ once you adopt JEP-380 Unix domain sockets), check compiled Java classes/JAR timestamps against source files, verify editable package importability inside the target venv ("$VENV_PYTHON" -c "import bridge"), confirm write permissions on the BlockStore directory, and probe your local LLM server—specifically querying Ollama's /api/ps (or ollama ps) and warning loudly if effective CONTEXT < 16384, or probing llama-server's /health endpoint.
+
+Process-Group Cleanup Trap: Register trap cleanup EXIT INT TERM to send SIGTERM (followed by SIGKILL after a 5-second grace period) to any child Java worker or background service launched by the script, and explicitly delete stale JEP-380 socket files (rm -f /tmp/fss_bridge.sock) so subsequent startups never fail to bind.
+
+Canonical Virtual-Environment Launch: Execute Streamlit via exec "$VENV_PYTHON" -m streamlit run app.py with PYTHONUNBUFFERED=1 and XLA_PYTHON_CLIENT_PREALLOCATE=false so the active venv interpreter—not an unrelated global streamlit binary—runs the app without JAX VRAM preallocation.
+
+Local Verification Suite to Execute on integration-bridge
+
+Because remote test execution against your private GitHub repositories was blocked, run the following 10-suite pytest and Hypothesis property-based verification matrix locally (leveraging Hypothesis's automated counterexample shrinking) prior to opening or merging the integration-bridge pull request:
+
+Test Suite
+
+Target Layer
+
+Exact Method / Property Under Test
+
+Pass Criterion
+
+test_uint64_roundtrip.py
+
+Java -> JSON -> Python -> UI
+
+Hypothesis @given(st.integers(0, (1<<64)-1)) plus boundary seeds (2^53-1, 2^53, 2^63-1, 2^63, 2^64-1, and 1795139460123456789 vs. +100 ns) persisted in BlockStore and retrieved
+
+Exact bitwise equality in Python int, monotonic findMinTs(), and distinct stringified display timestamps for 100 ns pairs
+
+test_pipe_deadlock_64kb.py
+
+bridge/java_retriever.py
+
+Trigger retrieval returning >256KB JSON on stdout while Java concurrently writes >128KB of logs to stderr
+
+Completes cleanly under 5 s with zero hang and zero JSON corruption
+
+test_timeout_orphan_cleanup.py
+
+bridge/java_retriever.py
+
+Invoke a simulated hung JVM with timeout=1.0, then inspect /proc or ps for surviving or defunct PIDs
+
+TimeoutExpired handled cleanly; 0 live or <defunct> child JVM processes remain
+
+test_stdout_pollution.py
+
+Integration Wire Protocol
+
+Launch JavaRetriever with JAVA_TOOL_OPTIONS="-Dtest.flag=1" injected into child env
+
+Pydantic v2 TypeAdapter parses framed response with zero JSON decode errors
+
+test_zero_event_contract.py
+
+End-to-End Pipeline
+
+Query a time range with 0 persisted events across Java BlockStore -> Python -> UI
+
+Returns typed status="EMPTY", activates Data Gaps Quarantine, short-circuits LLM into INSUFFICIENT_EVIDENCE
+
+test_blockstore_concurrency.py
+
+Java BlockStore + Locking
+
+Spawn 8 concurrent Python threads/processes issuing overlapping BlockStore writes and bounded reads
+
+Zero OverlappingFileLockException, zero torn 64KB blocks, 100% read-back integrity
+
+test_streamlit_rerun_delegation.py
+
+app.py and streamlit_app.py
+
+Simulate initial load plus 3 consecutive widget reruns against app.py
+
+All 8 UI sections render across every rerun; zero blank-page regression; zero torch.classes exceptions
+
+test_context_budget_guard.py
+
+Local LLM Client
+
+Feed a synthetic 500-event timeline against simulated num_ctx=4096 and num_ctx=16384
+
+Pre-flight guard triggers deterministic compaction/warning before dispatch; never sends silent overflow
+
+test_qwen3_think_budget.py
+
+Local LLM Client
+
+Simulate an unclosed <think> stream exceeding thinking_budget tokens without token 151668
+
+Guard injects </think> close prompt, emits reasoning_truncated=True, and produces schema-valid JSON
+
+test_adversarial_citations.py
+
+Validation Badges
+
+Fuzz outputs containing [ev-fake], [drone-298], entity-swapped valid IDs, and correlation-to-causation overclaims
+
+100% rejection of fake/swapped IDs; FORCE_OVERCLAIM badge triggered on uncalibrated causal claims
+
+Add these deterministic suites (mocking local LLM HTTP responses so runners require no GPU) to a dual-runtime GitHub Actions CI workflow pairing actions/setup-java (with Gradle/Maven caching) and actions/setup-python@v5 (cache: 'pip') so every push to integration-bridge verifies Java compilation, pytest + Hypothesis invariants, and headless Streamlit startup automatically.
+
+Phased Implementation Roadmap
+
+Phase 1 — Today (Zero-Bug Stabilization, ~4–6 hours): Replace sitecustomize.py with pyproject.toml + pip install -e .; confirm app.py invokes an explicit streamlit_app.main(); harden .streamlit/config.toml (fileWatcherType = "none", maxCacheDataSize = "1gb"); harden bridge/java_retriever.py pipe draining, strict UTF-8 decoding, start_new_session=True, and TimeoutExpired teardown; enforce Long.toUnsignedString + stringified uint64 timestamps inside a Pydantic v2 wire contract; add the pre-flight token budget guard with num_ctx ≥ 16384; and execute the 10-suite local pytest + Hypothesis test harness.
+
+Phase 2 — Short-Term (Persistent IPC, Concurrency, and Hybrid RAG, 2–3 days): Wrap shared Python LLM, RAG, and IPC resources inside a global ThreadSafeWrapper(threading.Lock) via @st.cache_resource; migrate JavaRetriever from one-shot CLI spawns to a persistent Java worker over JEP-380 AF_UNIX Unix domain sockets (or stdio NDJSON) with single-writer ReentrantReadWriteLock + FileChannel.lock() + force(true) and trace_id correlation; upgrade Domain Knowledge RAG to bm25s + Qwen3-Embedding-0.6B + RRF (k = 60) + Qwen3-Reranker-0.6B; and index historical resolved incidents for few-shot Chain-of-Thought retrieval modeled on RCACopilot.
+
+Phase 3 — Production Maturity (Epistemic Gates and Constrained Decoding, 3–5 days): Enforce decode-time Pydantic JSON schemas via llama-server json_schema / GBNF (or XGrammar-2 TagDispatch for thinking models) paired with host-memory prefix caching (--cram 256); wire a pre-generation sufficiency gate modeled on RINSE ahead of synthesis; and expand Validation Badges to the full four-tier auditor (metadata ID + entity binding + post-hoc P-Cite/entailment + ForceBench 5-axis warrant-strength auditing with bounded regeneration or abstention).

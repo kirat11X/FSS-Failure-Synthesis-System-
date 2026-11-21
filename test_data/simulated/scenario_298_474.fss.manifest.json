@@ -1,0 +1,54 @@
+{
+  "scenario": "scenario_298_474",
+  "description": "Cross-agent failure cascade: Drone 298 LiDAR timeout causes Drone 474 collision avoidance and formation drop.",
+  "seed": 42,
+  "base_timestamp_ns": 1791454020000000000,
+  "agents": [
+    298,
+    474,
+    901
+  ],
+  "root_cause": {
+    "source_id": 298,
+    "event_type": "LIDAR_STATUS",
+    "event_type_id": 16,
+    "timestamp_ns": 1791454023050000000,
+    "timestamp_iso": "2026-10-08T10:07:03.050000000Z",
+    "status_code": 17,
+    "status_name": "LIDAR_TIMEOUT",
+    "timeout_count": 3
+  },
+  "effects": [
+    {
+      "source_id": 474,
+      "event_type": "AVOIDANCE",
+      "timestamp_ns": 1791454023120000000,
+      "timestamp_iso": "2026-10-08T10:07:03.120000000Z",
+      "reason": "COLLISION_RISK",
+      "min_separation_m": 3.2,
+      "heading_change_deg": -35
+    },
+    {
+      "source_id": 474,
+      "event_type": "FORMATION_STATE",
+      "timestamp_ns": 1791454023180000000,
+      "timestamp_iso": "2026-10-08T10:07:03.180000000Z",
+      "state": "LEFT_FORMATION",
+      "formation_id": 7
+    }
+  ],
+  "data_gaps": [
+    {
+      "source_id": 298,
+      "timestamp_ns": 1791454023060000000,
+      "opaque_bytes_count": 8,
+      "description": "Diagnostic record includes 8 unmodeled opaque vendor bytes."
+    }
+  ],
+  "output_file": "/home/kirat/coding/minor/test_data/simulated/scenario_298_474.fss.bin",
+  "total_events": 14,
+  "time_start_ns": 1791454021200000000,
+  "time_end_ns": 1791454023400000000,
+  "time_start_iso": "2026-10-08T10:07:01.200000000Z",
+  "time_end_iso": "2026-10-08T10:07:03.400000000Z"
+}

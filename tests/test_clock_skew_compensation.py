@@ -1,0 +1,222 @@
+"""Comprehensive test suite for Clock Skew Compensation and Causality Analysis (REQ-035, REQ-048).
+
+Verifies:
+  1. Strict adherence to Hard Rule 5 & §19: Producer timestamp_ns is NEVER mutated or replaced.
+  2. Golden fixture tests using fixtures/golden/clock_skew_pair.bin.
+  3. Bounded pairwise clock skew estimation [min_offset_ns, max_offset_ns].
+  4. Non-monotonic timestamp ordering detection and Lamport happens-before logical ordering.
+  5. Multi-source clock caveats vs single-source behavior.
+  6. Multi-domain synthetic scenarios (Drone swarm, AGV robots, PLC interlocks).
+  7. Handling of DecodedEvent, EventRecord, and raw dict representations.
+"""
+
+from __future__ import annotations
+
+import copy
+from pathlib import Path
+
+import pytest
+
+from bridge.clock_skew_compensator import (
+    AmbiguousCausalPair,
+    ClockSkewReport,
+    analyze_clock_skew,
+)
+from fss_py.decoder import decode_all
+from fss_py.model import DecodeStatus, DecodedEvent, EventRecord
+from fss_py.schema import load_schema_file
+from fss_py.wire import iter_envelopes
+
+ROOT_DIR = Path(__file__).resolve().parent.parent
+
+
+@pytest.fixture
+def drone_registry():
+    return load_schema_file(str(ROOT_DIR / "schemas" / "drone_v0.yaml"))
+
+
+@pytest.fixture
+def golden_clock_skew_events(drone_registry):
+    bin_path = ROOT_DIR / "fixtures" / "golden" / "clock_skew_pair.bin"
+    raw = bin_path.read_bytes()
+    records = list(iter_envelopes(raw))
+    return decode_all(records, drone_registry)
+
+
+def test_01_golden_clock_skew_pair_detection(golden_clock_skew_events):
+    """Verify that fixtures/golden/clock_skew_pair.bin triggers skew detection."""
+    # Create deep copies of timestamps to verify Hard Rule 5 (no mutation)
+    original_timestamps = [e.timestamp_ns for e in golden_clock_skew_events]
+    original_dicts = [copy.deepcopy(e.to_dict()) for e in golden_clock_skew_events]
+
+    report = analyze_clock_skew(golden_clock_skew_events)
+
+    # 1. Skew detected
+    assert report.skew_detected is True
+    assert 115 in report.sources
+    assert 220 in report.sources
+
+    # 2. Hard Rule 5: Timestamps MUST NOT be mutated
+    for idx, e in enumerate(golden_clock_skew_events):
+        assert e.timestamp_ns == original_timestamps[idx], "Producer timestamp_ns was mutated!"
+        assert e.to_dict() == original_dicts[idx], "DecodedEvent dict representation was mutated!"
+
+    # 3. Pairwise skew bounds: (115, 220)
+    assert (115, 220) in report.estimated_offset_bounds_ns
+    min_ns, max_ns = report.estimated_offset_bounds_ns[(115, 220)]
+
+    # Drone 115 LIDAR_STATUS at 1791454145250000000; Drone 220 AVOIDANCE at 1791454145080000000.
+    # Raw diff = 170,000,000 ns (170 ms).
+    assert min_ns == 170_000_000
+    assert max_ns >= 170_000_000
+
+    # The ground truth clock skew in fixtures is 250 ms (250,000,000 ns).
+    # It must fall cleanly inside our estimated bounds!
+    ground_truth_skew_ns = 250_000_000
+    assert min_ns <= ground_truth_skew_ns <= max_ns
+
+    # 4. Ambiguous pairs and Lamport notes
+    assert len(report.ambiguous_pairs) >= 1
+    amb = report.ambiguous_pairs[0]
+    assert amb["source_cause"] == 115
+    assert amb["source_effect"] == 220
+    assert amb["raw_offset_ns"] == 170_000_000
+    assert amb["inversion_detected"] is True
+
+    # 5. Clock caveat
+    assert "⏱️ Non-monotonic ordering detected between Source 115 and Source 220" in report.clock_caveat
+    assert "Causation cannot be inferred from raw timestamps alone." in report.clock_caveat
+
+
+def test_02_hard_rule_5_producer_timestamp_never_mutated():
+    """Verify under all representations that timestamp_ns is never mutated or replaced."""
+    # Synthetic DecodedEvents with inverted order
+    e_cause = DecodedEvent(
+        event_id="ev-cause",
+        source_id=1,
+        timestamp_ns=2000_000_000,  # 2.0s
+        event_type=0x10,
+        event_name="FAULT_SENSOR",
+        schema_version=1,
+        decode_status=DecodeStatus.SUCCESS,
+        fields={"status_name": "TIMEOUT", "status_code": 1},
+        interpreted_fields=["status_name"],
+        unknown_bytes=0,
+        reason=None,
+        warnings=[],
+        payload_len=6,
+    )
+    e_react = DecodedEvent(
+        event_id="ev-react",
+        source_id=2,
+        timestamp_ns=1000_000_000,  # 1.0s (appears earlier due to clock skew)
+        event_type=0x20,
+        event_name="AVOIDANCE",
+        schema_version=1,
+        decode_status=DecodeStatus.SUCCESS,
+        fields={"reason": "COLLISION_RISK", "reason_code": 1},
+        interpreted_fields=["reason"],
+        unknown_bytes=0,
+        reason=None,
+        warnings=[],
+        payload_len=6,
+    )
+
+    events = [e_cause, e_react]
+    report = analyze_clock_skew(events)
+
+    assert report.skew_detected is True
+    # Strictly check timestamps
+    assert e_cause.timestamp_ns == 2000_000_000
+    assert e_react.timestamp_ns == 1000_000_000
+
+
+def test_03_synthetic_agv_robot_scenario_sc5():
+    """Verify SC5: AGV-12 battery critical vs AGV-7 replan with AGV-7 clock skewed earlier."""
+    events = [
+        # AGV-7 replans at local producer timestamp 100_000_000 ns
+        {
+            "event_id": "ev-agv7-replan",
+            "source_id": 7,
+            "timestamp_ns": 100_000_000,
+            "event_name": "REPLAN_PATH",
+            "fields": {"reason": "OBSTACLE", "state": "REPLAN"},
+        },
+        # AGV-12 reports critical battery at local producer timestamp 250_000_000 ns (150 ms later)
+        {
+            "event_id": "ev-agv12-batt",
+            "source_id": 12,
+            "timestamp_ns": 250_000_000,
+            "event_name": "BATTERY_STATUS",
+            "fields": {"battery_pct": 5, "status_name": "BATTERY_CRITICAL"},
+        },
+    ]
+
+    report = analyze_clock_skew(events)
+    assert report.skew_detected is True
+    assert (12, 7) in report.estimated_offset_bounds_ns
+
+    min_drift, max_drift = report.estimated_offset_bounds_ns[(12, 7)]
+    assert min_drift == 150_000_000  # 250ms - 100ms = 150ms
+    assert max_drift >= 150_000_000
+
+    assert len(report.lamport_order_notes) >= 1
+    assert "Inferred Lamport logical order" in report.lamport_order_notes[0]
+    assert "Source 12" in report.lamport_order_notes[0]
+    assert "Source 7" in report.lamport_order_notes[0]
+
+
+def test_04_single_source_no_skew_no_caveat():
+    """Verify that single-source events produce no skew and no caveat."""
+    events = [
+        {"source_id": 10, "timestamp_ns": 1000, "event_name": "LIDAR_STATUS", "fields": {"status_code": 1}},
+        {"source_id": 10, "timestamp_ns": 2000, "event_name": "AVOIDANCE", "fields": {"reason_code": 1}},
+    ]
+    report = analyze_clock_skew(events)
+    assert report.skew_detected is False
+    assert report.estimated_offset_bounds_ns == {}
+    assert report.ambiguous_pairs == []
+    assert report.clock_caveat == ""
+    assert report.sources == [10]
+
+
+def test_05_multi_source_monotonic_caveat():
+    """Verify that multiple sources with normal monotonic order receive standard multi-source caveat."""
+    events = [
+        {"source_id": 1, "timestamp_ns": 1000, "event_name": "HEARTBEAT", "fields": {}},
+        {"source_id": 2, "timestamp_ns": 2000, "event_name": "HEARTBEAT", "fields": {}},
+    ]
+    report = analyze_clock_skew(events)
+    assert report.skew_detected is False
+    assert report.estimated_offset_bounds_ns == {}
+    assert "Producer clocks are not synchronized" in report.clock_caveat
+    assert "Comparing timestamps across sources does not establish order or causality" in report.clock_caveat
+
+
+def test_06_event_record_inputs():
+    """Verify that analyze_clock_skew handles raw EventRecord instances without errors."""
+    r1 = EventRecord(source_id=1, timestamp_ns=1000, event_type=0x10, payload_bytes=b"\x00" * 8)
+    r2 = EventRecord(source_id=2, timestamp_ns=2000, event_type=0x20, payload_bytes=b"\x00" * 8)
+
+    report = analyze_clock_skew([r1, r2])
+    assert report.sources == [1, 2]
+    # Timestamps intact
+    assert r1.timestamp_ns == 1000
+    assert r2.timestamp_ns == 2000
+
+
+def test_07_clock_skew_report_to_dict():
+    """Verify ClockSkewReport serialization."""
+    rep = ClockSkewReport(
+        skew_detected=True,
+        estimated_offset_bounds_ns={(115, 220): (170_000_000, 1_170_000_000)},
+        ambiguous_pairs=[{"pair": 1}],
+        lamport_order_notes=["Note 1"],
+        clock_caveat="Caveat text",
+        sources=[115, 220],
+    )
+    d = rep.to_dict()
+    assert d["skew_detected"] is True
+    assert d["estimated_offset_bounds_ns"] == {"115->220": [170_000_000, 1_170_000_000]}
+    assert d["sources"] == [115, 220]
+    assert d["clock_caveat"] == "Caveat text"

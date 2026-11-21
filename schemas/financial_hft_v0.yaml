@@ -1,0 +1,38 @@
+# FSS decoder schema for Financial HFT domain
+schema_set: financial_hft
+
+enums:
+  cxl_rej_reason:
+    0: TOO_LATE_TO_CANCEL
+    1: UNKNOWN_ORDER
+    2: BROKER_OPTION
+  ord_status:
+    0: NEW
+    1: PARTIALLY_FILLED
+    2: FILLED
+    4: CANCELLED
+    8: REJECTED
+
+event_types:
+  0x0501:
+    name: ORDER_BOOK_DEPTH
+    version: 1
+    fields:
+      - {name: symbol_id, offset: 0,  type: u32, size: 4, endian: little}
+      - {name: bid_px,    offset: 4,  type: f64, size: 8, endian: little}
+      - {name: ask_px,    offset: 12, type: f64, size: 8, endian: little}
+      - {name: depth,     offset: 20, type: u32, size: 4, endian: little}
+
+  0x0502:
+    name: FIX_CANCEL_REJECT
+    version: 1
+    fields:
+      - {name: cl_ord_id,      offset: 0, type: u64, size: 8, endian: little}
+      - {name: reject_reason,  offset: 8, type: u16, size: 2, endian: little, enum: cxl_rej_reason, enum_field: reject_name}
+
+  0x0503:
+    name: FIX_EXEC_REPORT
+    version: 1
+    fields:
+      - {name: exec_id,    offset: 0, type: u64, size: 8, endian: little}
+      - {name: ord_status, offset: 8, type: u8,  size: 1, enum: ord_status, enum_field: ord_status_name}

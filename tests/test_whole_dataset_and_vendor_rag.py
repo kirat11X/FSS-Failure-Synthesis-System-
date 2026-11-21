@@ -403,9 +403,9 @@ def test_streamlit_apptest_initial_render_and_three_reruns_cyberpunk_css():
     assert len(at.title) > 0
     assert "Failure Synthesis System" in at.title[0].value
 
-    # Verify Tabs include the Vendor Manual / Domain Knowledge Inspector
+    # Verify Tabs include the Vendor Manual / Domain Knowledge / RAG Inspector
     tab_labels = [t.label for t in at.tabs]
-    assert any("Vendor Manual" in t or "Domain Knowledge" in t for t in tab_labels)
+    assert any("Vendor Manual" in t or "Domain Knowledge" in t or "Domain RAG" in t or "Error Codes" in t for t in tab_labels)
 
     # 3 Consecutive Reruns
     for rerun_idx in range(1, 4):

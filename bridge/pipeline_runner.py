@@ -27,12 +27,15 @@ from fss_py.model import ALL, RetrievalRequest, RetrievalResult
 from fss_py.schema import load_schema_file
 from fss_py.wire import iter_envelopes
 
+from bridge.clock_skew_compensator import analyze_clock_skew
 from bridge.hybrid_rag import (
     HistoricalIncident,
     format_exemplars_cot,
     retrieve_historical_exemplars,
     retrieve_hybrid_knowledge,
 )
+from bridge.progressive_investigator import ProgressiveInvestigator, investigate_progressive
+from bridge.report_exporter import export_html, export_jsonld, export_pdf
 from bridge.synthesizer import (
     DEFAULT_NUM_CTX,
     DEFAULT_THINKING_BUDGET,
@@ -305,6 +308,39 @@ def main(argv: list[str] | None = None) -> int:
         default=False,
         help="Print raw JSON or write to specified file path",
     )
+    parser.add_argument(
+        "--progressive",
+        action="store_true",
+        default=False,
+        help="Enable bounded progressive multi-step investigation (REQ-033, PI-01..PI-05)",
+    )
+    parser.add_argument(
+        "--max-context-requests",
+        type=int,
+        default=1,
+        help="Maximum follow-up context retrieval requests allowed (default: 1)",
+    )
+    parser.add_argument(
+        "--export-jsonld",
+        nargs="?",
+        const=True,
+        default=None,
+        help="Export JSON-LD provenance artifact (print to stdout or write to file path)",
+    )
+    parser.add_argument(
+        "--export-html",
+        nargs="?",
+        const=True,
+        default=None,
+        help="Export standalone HTML brief (print to stdout or write to file path)",
+    )
+    parser.add_argument(
+        "--export-pdf",
+        nargs="?",
+        const=True,
+        default=None,
+        help="Export PDF report (write to file path)",
+    )
 
     args = parser.parse_args(argv)
 
@@ -386,20 +422,58 @@ def main(argv: list[str] | None = None) -> int:
     # 5. Build evidence JSON
     evidence = build_evidence(decoded, query=args.query, retrieval=retrieval_res)
 
-    # 6. Retrieve knowledge & historical exemplars via Hybrid RAG
-    knowledge = retrieve_relevant_knowledge(evidence, args.query)
-    exemplars = retrieve_historical_exemplars(args.query, evidence=evidence, k=args.exemplars_k)
+    # 5b. Clock skew compensation & cross-source causality analysis (REQ-035, REQ-048)
+    skew_report = analyze_clock_skew(decoded)
+    if skew_report.skew_detected:
+        evidence["clock_skew"] = skew_report.to_dict()
+        if skew_report.clock_caveat:
+            evidence["clock_caveat"] = skew_report.clock_caveat
 
-    # 7. Synthesize & validate with context window enforcement & think budget guard
-    synthesis, val_report, model_name = synthesize_and_validate(
-        evidence,
-        args.query,
-        enable_thinking=args.enable_thinking,
-        thinking_budget=args.thinking_budget,
-        effective_num_ctx=args.num_ctx,
-        exemplars_k=args.exemplars_k,
-        vendor_manual_matches=vendor_matches,
-    )
+    if args.progressive:
+        def local_retriever(r_req: RetrievalRequest) -> RetrievalResult:
+            matched = [
+                e for e in events
+                if (r_req.source is ALL or e.source_id == r_req.source)
+                and r_req.t_start_ns <= e.timestamp_ns < r_req.t_end_ns
+                and (r_req.event_type is None or e.event_type == r_req.event_type)
+            ]
+            return RetrievalResult(
+                request=r_req,
+                events=matched[: r_req.max_events],
+                truncated=len(matched) > r_req.max_events,
+            )
+
+        prog_res = investigate_progressive(
+            query=args.query,
+            initial_request=req,
+            retriever=local_retriever,
+            schema_registry=registry,
+            max_context_requests=args.max_context_requests,
+            initial_events=events,
+            vendor_manual_matches=vendor_matches,
+        )
+        evidence = prog_res.evidence
+        knowledge = prog_res.knowledge
+        exemplars = prog_res.exemplars
+        synthesis = prog_res.synthesis
+        val_report = prog_res.validation_report
+        model_name = prog_res.model_name
+    else:
+        # Standard single-shot retrieval & synthesis
+        # 6. Retrieve knowledge & historical exemplars via Hybrid RAG
+        knowledge = retrieve_relevant_knowledge(evidence, args.query)
+        exemplars = retrieve_historical_exemplars(args.query, evidence=evidence, k=args.exemplars_k)
+
+        # 7. Synthesize & validate with context window enforcement & think budget guard
+        synthesis, val_report, model_name = synthesize_and_validate(
+            evidence,
+            args.query,
+            enable_thinking=args.enable_thinking,
+            thinking_budget=args.thinking_budget,
+            effective_num_ctx=args.num_ctx,
+            exemplars_k=args.exemplars_k,
+            vendor_manual_matches=vendor_matches,
+        )
 
     # 8. Output report or JSON
     report = render_report(
@@ -414,26 +488,29 @@ def main(argv: list[str] | None = None) -> int:
         vendor_matches=vendor_matches,
     )
 
+    out = {
+        "evidence": evidence,
+        "knowledge": knowledge,
+        "vendor_matches": vendor_matches,
+        "exemplars": [asdict(ex) for ex in exemplars],
+        "synthesis": synthesis,
+        "validation": {
+            "verdict": val_report.verdict,
+            "badge": str(getattr(val_report, "badge", val_report.verdict)),
+            "valid_citations": val_report.valid_citations,
+            "invalid_citations": val_report.invalid_citations,
+            "notes": val_report.notes,
+            "tier_results": getattr(val_report, "tier_results", {}),
+            "force_axes": getattr(val_report, "force_axes", {}),
+            "entity_bindings": getattr(val_report, "entity_bindings", []),
+        },
+        "model": model_name,
+        "report": report,
+    }
+    if "clock_skew" in evidence:
+        out["clock_skew"] = evidence["clock_skew"]
+
     if args.json_out:
-        out = {
-            "evidence": evidence,
-            "knowledge": knowledge,
-            "vendor_matches": vendor_matches,
-            "exemplars": [asdict(ex) for ex in exemplars],
-            "synthesis": synthesis,
-            "validation": {
-                "verdict": val_report.verdict,
-                "badge": str(getattr(val_report, "badge", val_report.verdict)),
-                "valid_citations": val_report.valid_citations,
-                "invalid_citations": val_report.invalid_citations,
-                "notes": val_report.notes,
-                "tier_results": getattr(val_report, "tier_results", {}),
-                "force_axes": getattr(val_report, "force_axes", {}),
-                "entity_bindings": getattr(val_report, "entity_bindings", []),
-            },
-            "model": model_name,
-            "report": report,
-        }
         json_str = json.dumps(out, indent=2)
         if isinstance(args.json_out, str):
             out_file = Path(args.json_out)
@@ -446,6 +523,39 @@ def main(argv: list[str] | None = None) -> int:
             print(json_str)
     else:
         print(report)
+
+    # Post-Mortem Report Exporters (REQ-013, FR-13)
+    if args.export_jsonld is not None:
+        jsonld_str = export_jsonld(out)
+        if isinstance(args.export_jsonld, str) and args.export_jsonld not in ("True", "true", ""):
+            p = Path(args.export_jsonld)
+            if not p.is_absolute():
+                p = ROOT_DIR / p
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(jsonld_str, encoding="utf-8")
+            print(f"JSON-LD provenance artifact written to {p}")
+        else:
+            print(jsonld_str)
+
+    if args.export_html is not None:
+        html_str = export_html(out)
+        if isinstance(args.export_html, str) and args.export_html not in ("True", "true", ""):
+            p = Path(args.export_html)
+            if not p.is_absolute():
+                p = ROOT_DIR / p
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(html_str, encoding="utf-8")
+            print(f"HTML brief written to {p}")
+        else:
+            print(html_str)
+
+    if args.export_pdf is not None:
+        target_path = args.export_pdf if isinstance(args.export_pdf, str) and args.export_pdf not in ("True", "true", "") else "fss_report.pdf"
+        p = Path(target_path)
+        if not p.is_absolute():
+            p = ROOT_DIR / p
+        pdf_bytes = export_pdf(out, output_path=p)
+        print(f"PDF report ({len(pdf_bytes)} bytes) written to {p}")
 
     return 0
 

@@ -4,615 +4,279 @@
    Functional Phosphor Glow System • Zero Text Truncation • WCAG AA Contrast
    ============================================================================= */
 
-@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&family=IBM+Plex+Sans:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400&family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&family=IBM+Plex+Sans:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400&display=swap');
 
 :root {
-  /* Functional Phosphor Glow System */
-  --phosphor-green: #34F5A4;
-  --phosphor-green-glow: 0 0 12px rgba(52, 245, 164, 0.25);
+  --bg: #0a0d0c;
+  --surface: #101514;
+  --surface-alt: #141b19;
+  --border: #1f2b27;
+  --text: #e2ece9;
+  --muted: #8aa099;
 
-  --phosphor-amber: #FFB347;
-  --phosphor-amber-glow: 0 0 12px rgba(255, 179, 71, 0.25);
+  /* Functional Phosphor Glow Palette (status-only) */
+  --p-green: #34f5a4;
+  --p-amber: #ffb347;
+  --p-red: #ff4d5a;
+  --p-cyan: #5ce1e6;
 
-  --phosphor-red: #FF4D5A;
-  --phosphor-red-glow: 0 0 12px rgba(255, 77, 90, 0.28);
-
-  --phosphor-cyan: #5CE1E6;
-  --phosphor-cyan-glow: 0 0 10px rgba(92, 225, 230, 0.22);
+  --glow-green: 0 0 12px rgba(52, 245, 164, 0.24);
+  --glow-amber: 0 0 12px rgba(255, 179, 71, 0.24);
+  --glow-red: 0 0 12px rgba(255, 77, 90, 0.28);
+  --glow-cyan: 0 0 10px rgba(92, 225, 230, 0.22);
 
   /* Matte Dark Obsidian Surfaces */
-  --bg-canvas: #0A0D0C;
+  --bg-canvas: #0a0d0c;
   --bg-container: #101514;
-  --bg-surface: #141B19;
-  --bg-surface-hover: #18221F;
+  --bg-surface: #141b19;
+  --bg-surface-hover: #18221f;
 
   /* Crisp 1px Borders */
-  --border-crisp: #1F2B27;
-  --border-subtle: #16201D;
-  --border-focus: #34F5A4;
+  --border-crisp: #1f2b27;
+  --border-subtle: #16201d;
+  --border-focus: #34f5a4;
 
   /* Typography Colors */
-  --text-main: #E2ECE9;
-  --text-muted: #8E9E99;
-  --text-dim: #5C6E68;
-  --text-bright: #FFFFFF;
+  --text-main: #e2ece9;
+  --text-muted: #8e9e99;
+  --text-dim: #5c6e68;
+  --text-bright: #ffffff;
 
-  /* Sharp Geometry */
+  /* Functional Phosphor Variables (legacy + new) */
+  --phosphor-green: #34f5a4;
+  --phosphor-amber: #ffb347;
+  --phosphor-red: #ff4d5a;
+  --phosphor-cyan: #5ce1e6;
+  --neon-cyan: #5ce1e6;
+  --bg-void: #0a0d0c;
   --radius-sharp: 3px;
-
-  /* Backward Compatibility Aliases for test suites & components (CYBERPUNK superseded by RESEARCH CRT) */
-  --bg-void: #0A0D0C;
-  --bg-secondary: #101514;
-  --bg-card: #101514;
-  --bg-card-hover: #141B19;
-  --neon-cyan: #5CE1E6;
-  --neon-cyan-glow: 0 0 10px rgba(92, 225, 230, 0.22);
-  --acid-green: #34F5A4;
-  --acid-green-glow: 0 0 12px rgba(52, 245, 164, 0.25);
-  --retro-amber: #FFB347;
-  --retro-amber-glow: 0 0 12px rgba(255, 179, 71, 0.25);
-  --crimson-fault: #FF4D5A;
-  --crimson-fault-glow: 0 0 12px rgba(255, 77, 90, 0.28);
-  --border-cyan: #1F2B27;
-  --border-card: #1F2B27;
 }
 
-/* =============================================================================
-   Ultra-Subtle CRT Scanline Background Layer (Opacity 0.035, Non-interfering)
-   ============================================================================= */
-body::before, .stApp::before {
-  content: " ";
-  display: block;
+html, body, [data-testid="stAppViewContainer"], .stApp {
+  background-color: var(--bg) !important;
+  color: var(--text) !important;
+  font-family: 'IBM Plex Sans', system-ui, sans-serif !important;
+}
+
+/* Subtle CRT scanline layer — low opacity, never blocks clicks */
+[data-testid="stAppViewContainer"]::before, .stApp::before {
+  content: "";
   position: fixed;
-  top: 0; left: 0; bottom: 0; right: 0;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9999;
   background: repeating-linear-gradient(
-    0deg,
-    rgba(0, 0, 0, 0.25) 0px,
-    rgba(0, 0, 0, 0.25) 1px,
+    to bottom,
+    rgba(255, 255, 255, 0.025) 0px,
+    rgba(255, 255, 255, 0.025) 1px,
     transparent 1px,
     transparent 3px
   );
-  opacity: 0.035;
-  z-index: 99999;
-  pointer-events: none;
 }
 
-/* Base Canvas */
-.stApp {
-  background-color: var(--bg-canvas) !important;
-  color: var(--text-main) !important;
-  font-family: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
+.block-container {
+  max-width: 1400px !important;
+  padding-top: 1.2rem !important;
+  padding-bottom: 2.5rem !important;
 }
 
-/* =============================================================================
-   Typography: Clean Research-Grade Monospace for Telemetry & Headers
-   ============================================================================= */
-h1, h2, h3, .stHeading {
-  font-family: 'IBM Plex Mono', 'JetBrains Mono', monospace !important;
-  font-weight: 600 !important;
-  letter-spacing: 0.5px !important;
-  color: var(--text-bright) !important;
+/* Screen-reader / invisible title helper */
+.fss-sr-only {
+  display: none !important;
+  height: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
 }
 
-h4, h5, h6 {
-  font-family: 'IBM Plex Mono', 'JetBrains Mono', monospace !important;
-  font-weight: 500 !important;
-  letter-spacing: 0.3px !important;
-  color: var(--phosphor-cyan) !important;
-}
-
-p, span, label, div {
-  font-family: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  color: var(--text-main);
-}
-
-code, pre, .stCodeBlock, .font-mono {
-  font-family: 'IBM Plex Mono', 'JetBrains Mono', monospace !important;
-}
-
-/* =============================================================================
-   Sidebar: Flat Slate Container with Crisp Border
-   ============================================================================= */
-section[data-testid="stSidebar"] {
-  background-color: var(--bg-container) !important;
-  border-right: 1px solid var(--border-crisp) !important;
-  box-shadow: none !important;
-}
-
-section[data-testid="stSidebar"] h1,
-section[data-testid="stSidebar"] h2,
-section[data-testid="stSidebar"] h3 {
-  font-size: 0.95rem !important;
-  text-transform: uppercase !important;
-  letter-spacing: 0.8px !important;
-  color: var(--text-muted) !important;
-  border-bottom: 1px solid var(--border-crisp) !important;
-  padding-bottom: 6px !important;
-  margin-top: 14px !important;
-}
-
-/* Compact Sidebar CRT Status Indicator */
-.crt-status-indicator {
+/* Single Top Masthead */
+.fss-masthead {
   display: flex;
+  justify-content: space-between;
   align-items: center;
-  gap: 8px;
-  background-color: var(--bg-surface);
-  border: 1px solid var(--border-crisp);
-  border-radius: var(--radius-sharp);
-  padding: 6px 10px;
+  gap: 1rem;
+  padding-bottom: 0.85rem;
+  margin-bottom: 1.15rem;
+  border-bottom: 1px solid var(--border);
+}
+.fss-title {
   font-family: 'IBM Plex Mono', monospace;
-  font-size: 0.78rem;
-  letter-spacing: 0.4px;
-  color: var(--text-main);
-  margin-top: 6px;
-  margin-bottom: 12px;
+  font-size: 1.25rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--text);
+  margin: 0;
 }
-
-.crt-status-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background-color: var(--phosphor-green);
-  box-shadow: var(--phosphor-green-glow);
-  flex-shrink: 0;
+.fss-subtitle {
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin-top: 0.2rem;
 }
-
-.crt-status-dot.amber {
-  background-color: var(--phosphor-amber);
-  box-shadow: var(--phosphor-amber-glow);
-}
-
-.crt-status-dot.cyan {
-  background-color: var(--phosphor-cyan);
-  box-shadow: var(--phosphor-cyan-glow);
-}
-
-/* Backward-compatible neon-badge-pill styled cleanly */
-.neon-badge-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  background: var(--bg-surface);
-  border: 1px solid var(--border-crisp);
-  color: var(--text-main);
-  padding: 5px 10px;
-  border-radius: var(--radius-sharp);
+.fss-status-pill {
   font-family: 'IBM Plex Mono', monospace;
-  font-size: 0.78rem;
-  letter-spacing: 0.3px;
+  font-size: 0.74rem;
+  padding: 0.32rem 0.7rem;
+  border-radius: 3px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  white-space: nowrap;
+}
+.fss-status-pill.online {
+  color: var(--p-green);
+  border-color: rgba(52, 245, 164, 0.45);
+  box-shadow: var(--glow-green);
+}
+.fss-status-pill.offline {
+  color: var(--p-amber);
+  border-color: rgba(255, 179, 71, 0.45);
+  box-shadow: var(--glow-amber);
 }
 
-.neon-badge-pill.cached {
-  border-color: rgba(52, 245, 164, 0.4);
-  color: var(--phosphor-green);
-}
-
-/* =============================================================================
-   Primary Action Buttons & Form Elements
-   ============================================================================= */
-div.stButton > button,
-div.stButton > button:first-child {
-  background: var(--bg-surface) !important;
-  color: var(--phosphor-green) !important;
-  border: 1px solid rgba(52, 245, 164, 0.45) !important;
-  border-radius: var(--radius-sharp) !important;
-  font-family: 'IBM Plex Mono', monospace !important;
-  font-weight: 600 !important;
-  font-size: 0.88rem !important;
-  letter-spacing: 0.6px !important;
-  padding: 0.5rem 1.1rem !important;
-  text-transform: uppercase !important;
-  box-shadow: none !important;
-  transition: all 0.15s ease-in-out !important;
-}
-
-div.stButton > button:hover,
-div.stButton > button:first-child:hover {
-  background: #15241F !important;
-  border-color: var(--phosphor-green) !important;
-  color: #FFFFFF !important;
-  box-shadow: var(--phosphor-green-glow) !important;
-  transform: translateY(-1px) !important;
-}
-
-/* Inputs: Crisp 1px border with Phosphor Green Active Focus Halo */
-input[type="text"], input[type="number"], .stTextInput > div > div > input {
-  background-color: var(--bg-surface) !important;
-  color: #FFFFFF !important;
-  border: 1px solid var(--border-crisp) !important;
-  border-radius: var(--radius-sharp) !important;
-  font-family: 'IBM Plex Mono', monospace !important;
-  font-size: 0.9rem !important;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease !important;
-}
-
-input[type="text"]:focus, .stTextInput > div > div > input:focus {
-  border-color: var(--phosphor-green) !important;
-  box-shadow: var(--phosphor-green-glow) !important;
-  outline: none !important;
-}
-
-/* Quick Query Chips */
-.query-chip-bar {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 6px;
-  margin-bottom: 14px;
-}
-
-.query-chip {
-  display: inline-flex;
-  align-items: center;
-  background: var(--bg-container);
-  color: var(--text-muted);
-  border: 1px solid var(--border-crisp);
-  border-radius: var(--radius-sharp);
-  padding: 4px 10px;
-  font-family: 'IBM Plex Mono', monospace;
-  font-size: 0.78rem;
-  letter-spacing: 0.3px;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.query-chip:hover {
-  background: var(--bg-surface);
-  color: var(--phosphor-cyan);
-  border-color: rgba(92, 225, 230, 0.4);
-  box-shadow: var(--phosphor-cyan-glow);
-  transform: translateY(-1px);
-}
-
-/* =============================================================================
-   HUD KPI Strip: Clean Layout & Zero Text Truncation
-   ============================================================================= */
-.hud-kpi-strip {
+/* Single Unified KPI Grid (NO duplicate st.metric row) */
+.fss-kpi-grid {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 10px;
-  margin-bottom: 18px;
-  width: 100%;
+  gap: 0.75rem;
+  margin: 0.85rem 0 1.1rem 0;
 }
-
-@media (max-width: 900px) {
-  .hud-kpi-strip {
-    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  }
+.fss-kpi-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0.75rem 0.9rem;
+  min-width: 0;
 }
-
-.hud-kpi-card {
-  background-color: var(--bg-container);
-  border: 1px solid var(--border-crisp);
-  border-left: 3px solid var(--phosphor-cyan);
-  border-radius: var(--radius-sharp);
-  padding: 10px 12px;
-  transition: border-color 0.15s ease;
-  overflow: visible;
-}
-
-.hud-kpi-card:hover {
-  border-color: rgba(92, 225, 230, 0.4);
-}
-
-.hud-kpi-label {
+.fss-kpi-label {
   font-family: 'IBM Plex Mono', monospace;
-  font-size: 0.72rem;
-  font-weight: 600;
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
-  letter-spacing: 0.7px;
-  color: var(--text-muted);
-  margin-bottom: 4px;
-  white-space: nowrap;
-  overflow: visible;
-  text-overflow: clip;
+  color: var(--muted);
 }
-
-.hud-kpi-value {
-  font-family: 'IBM Plex Mono', 'JetBrains Mono', monospace;
-  font-size: 1.15rem;
+.fss-kpi-val {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 1.02rem;
   font-weight: 600;
-  color: var(--text-bright);
+  color: var(--text);
+  margin-top: 0.28rem;
   white-space: nowrap;
-  overflow: visible;
-  text-overflow: clip;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-
-.hud-kpi-meta {
+.fss-kpi-sub {
   font-family: 'IBM Plex Mono', monospace;
   font-size: 0.7rem;
-  color: var(--phosphor-cyan);
-  margin-top: 2px;
+  color: var(--p-cyan);
+  margin-top: 0.18rem;
   white-space: nowrap;
-  overflow: visible;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-/* Prevent Streamlit Default Metric Label & Value Truncation */
-div[data-testid="stMetric"] {
-  background-color: var(--bg-container) !important;
-  border: 1px solid var(--border-crisp) !important;
-  border-radius: var(--radius-sharp) !important;
-  padding: 8px 12px !important;
+/* Unified Synthesis + Epistemic Verdict Panel */
+.fss-verdict {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  border-radius: 3px;
+  padding: 1rem 1.15rem;
+  margin-bottom: 1rem;
 }
+.fss-verdict.VERIFIED_SUPPORTED { border-color: rgba(52,245,164,0.45); border-left-color: var(--p-green); box-shadow: var(--glow-green); }
+.fss-verdict.FORCE_OVERCLAIM    { border-color: rgba(255,179,71,0.45); border-left-color: var(--p-amber); box-shadow: var(--glow-amber); }
+.fss-verdict.INSUFFICIENT_EVIDENCE { border-color: rgba(92,225,230,0.45); border-left-color: var(--p-cyan); box-shadow: var(--glow-cyan); }
+.fss-verdict.ENTITY_MISMATCH,
+.fss-verdict.UNGROUNDED_HALLUCINATION { border-color: rgba(255,77,90,0.5); border-left-color: var(--p-red); box-shadow: var(--glow-red); }
 
-div[data-testid="stMetric"] label {
-  white-space: normal !important;
-  overflow: visible !important;
-  text-overflow: unset !important;
-  font-family: 'IBM Plex Mono', monospace !important;
-  font-size: 0.72rem !important;
-  letter-spacing: 0.5px !important;
-  color: var(--text-muted) !important;
-}
-
-div[data-testid="stMetric"] div[data-testid="stMetricValue"] {
-  white-space: normal !important;
-  overflow: visible !important;
-  text-overflow: unset !important;
-  font-family: 'IBM Plex Mono', monospace !important;
-  font-size: 1.15rem !important;
-  color: var(--text-bright) !important;
-}
-
-/* =============================================================================
-   Functional Phosphor Epistemic Validation Badges (5 Distinct States)
-   Tight halos strictly around badges, never on narrative body paragraphs
-   ============================================================================= */
-.badge-epistemic {
-  border-radius: var(--radius-sharp);
-  padding: 14px 18px;
-  margin-bottom: 20px;
-  background: var(--bg-container);
-  border: 1px solid var(--border-crisp);
-}
-
-.badge-epistemic h3 {
-  margin-top: 0 !important;
-  margin-bottom: 6px !important;
-  font-size: 1.05rem !important;
-  font-family: 'IBM Plex Mono', monospace !important;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.badge-epistemic p {
-  margin-bottom: 0 !important;
-  font-size: 0.9rem !important;
-  line-height: 1.5 !important;
-  font-family: 'IBM Plex Sans', sans-serif !important;
-  color: var(--text-main) !important;
-}
-
-/* 1. VERIFIED_SUPPORTED: Phosphor Green */
-.badge-verified {
-  border-color: rgba(52, 245, 164, 0.4);
-  border-left: 4px solid var(--phosphor-green);
-  box-shadow: var(--phosphor-green-glow);
-}
-.badge-verified h3 {
-  color: var(--phosphor-green) !important;
-}
-.badge-verified strong {
-  color: var(--phosphor-green);
-}
-
-/* 2. FORCE_OVERCLAIM: Phosphor Amber */
-.badge-overclaim {
-  border-color: rgba(255, 179, 71, 0.4);
-  border-left: 4px solid var(--phosphor-amber);
-  box-shadow: var(--phosphor-amber-glow);
-}
-.badge-overclaim h3 {
-  color: var(--phosphor-amber) !important;
-}
-.badge-overclaim strong {
-  color: var(--phosphor-amber);
-}
-
-/* 3. ENTITY_MISMATCH: Phosphor Red */
-.badge-mismatch {
-  border-color: rgba(255, 77, 90, 0.4);
-  border-left: 4px solid var(--phosphor-red);
-  box-shadow: var(--phosphor-red-glow);
-}
-.badge-mismatch h3 {
-  color: var(--phosphor-red) !important;
-}
-.badge-mismatch strong {
-  color: var(--phosphor-red);
-}
-
-/* 4. UNGROUNDED_HALLUCINATION: Phosphor Red */
-.badge-hallucination {
-  border-color: rgba(255, 77, 90, 0.4);
-  border-left: 4px solid var(--phosphor-red);
-  box-shadow: var(--phosphor-red-glow);
-}
-.badge-hallucination h3 {
-  color: var(--phosphor-red) !important;
-}
-.badge-hallucination strong {
-  color: var(--phosphor-red);
-}
-
-/* 5. INSUFFICIENT_EVIDENCE: Phosphor Cyan */
-.badge-insufficient {
-  border-color: rgba(92, 225, 230, 0.4);
-  border-left: 4px solid var(--phosphor-cyan);
-  box-shadow: var(--phosphor-cyan-glow);
-}
-.badge-insufficient h3 {
-  color: var(--phosphor-cyan) !important;
-}
-.badge-insufficient strong {
-  color: var(--phosphor-cyan);
-}
-
-/* =============================================================================
-   Pills & Badges
-   ============================================================================= */
-.pill-verified {
+.fss-cite-chip {
   display: inline-block;
-  background-color: rgba(52, 245, 164, 0.1);
-  color: var(--phosphor-green);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.74rem;
+  padding: 0.1rem 0.42rem;
+  margin: 0 0.15rem;
+  border-radius: 2px;
+  background: rgba(52, 245, 164, 0.1);
   border: 1px solid rgba(52, 245, 164, 0.35);
-  padding: 2px 8px;
-  border-radius: var(--radius-sharp);
-  font-family: 'IBM Plex Mono', monospace;
-  font-size: 0.78rem;
-  font-weight: 500;
-  margin: 3px;
+  color: var(--p-green);
 }
 
-.pill-unverified {
-  display: inline-block;
-  background-color: rgba(255, 77, 90, 0.1);
-  color: var(--phosphor-red);
-  border: 1px solid rgba(255, 77, 90, 0.35);
-  padding: 2px 8px;
-  border-radius: var(--radius-sharp);
-  font-family: 'IBM Plex Mono', monospace;
-  font-size: 0.78rem;
-  font-weight: 500;
-  margin: 3px;
+/* Keep all 7 tabs on one crisp row without horizontal scrolling */
+.stTabs [data-baseweb="tab-list"], div[data-baseweb="tab-list"] {
+  gap: 0.35rem !important;
+  border-bottom: 1px solid var(--border) !important;
+  overflow-x: auto !important;
 }
-
-.pill-vendor-code {
-  display: inline-block;
-  background-color: rgba(92, 225, 230, 0.08);
-  color: var(--phosphor-cyan);
-  border: 1px solid rgba(92, 225, 230, 0.3);
-  padding: 2px 8px;
-  border-radius: var(--radius-sharp);
-  font-family: 'IBM Plex Mono', monospace;
-  font-size: 0.78rem;
-  font-weight: 500;
-  margin: 3px;
-}
-
-/* =============================================================================
-   Clean Tabbed Evidence Inspector
-   ============================================================================= */
-div[data-baseweb="tab-list"] {
-  background-color: var(--bg-container) !important;
-  border-bottom: 1px solid var(--border-crisp) !important;
-  gap: 4px !important;
-  padding: 4px 6px 0 6px !important;
-}
-
-div[data-baseweb="tab"] {
+.stTabs [data-baseweb="tab"], div[data-baseweb="tab"] {
   font-family: 'IBM Plex Mono', monospace !important;
-  font-size: 0.82rem !important;
-  letter-spacing: 0.4px !important;
-  color: var(--text-muted) !important;
-  background-color: transparent !important;
-  border: 1px solid transparent !important;
-  border-radius: var(--radius-sharp) var(--radius-sharp) 0 0 !important;
-  padding: 7px 14px !important;
-  transition: all 0.15s ease !important;
+  font-size: 0.78rem !important;
+  padding: 0.45rem 0.75rem !important;
+  color: var(--muted) !important;
+  background: transparent !important;
+  border: none !important;
 }
-
-div[data-baseweb="tab"]:hover {
-  color: var(--phosphor-cyan) !important;
-  background-color: var(--bg-surface) !important;
-}
-
-div[data-baseweb="tab"][aria-selected="true"] {
-  color: #FFFFFF !important;
-  background-color: var(--bg-canvas) !important;
-  border: 1px solid var(--border-crisp) !important;
-  border-bottom: 2px solid var(--phosphor-cyan) !important;
-  box-shadow: 0 2px 8px rgba(92, 225, 230, 0.15) !important;
-}
-
-/* Expanders */
-div[data-testid="stExpander"] {
-  background-color: var(--bg-container) !important;
-  border: 1px solid var(--border-crisp) !important;
-  border-radius: var(--radius-sharp) !important;
-}
-
-div[data-testid="stExpander"] summary {
-  font-family: 'IBM Plex Mono', monospace !important;
-  font-size: 0.88rem !important;
-  font-weight: 500 !important;
-  color: var(--text-main) !important;
-  letter-spacing: 0.3px !important;
-}
-
-div[data-testid="stExpander"] summary:hover {
-  color: var(--phosphor-cyan) !important;
-}
-
-/* Vendor Error Catalog Cards */
-.vendor-error-card {
-  background-color: var(--bg-container);
-  border: 1px solid var(--border-crisp);
-  border-left: 3px solid var(--phosphor-cyan);
-  border-radius: var(--radius-sharp);
-  padding: 12px 16px;
-  margin-bottom: 12px;
-}
-
-.vendor-error-card.severity-critical,
-.vendor-error-card.severity-error {
-  border-left-color: var(--phosphor-red);
-}
-
-.vendor-error-card.severity-warning,
-.vendor-error-card.severity-warn {
-  border-left-color: var(--phosphor-amber);
-}
-
-.vendor-error-card.severity-notice,
-.vendor-error-card.severity-info {
-  border-left-color: var(--phosphor-green);
-}
-
-.vendor-error-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 6px;
-}
-
-.vendor-error-code {
-  font-family: 'IBM Plex Mono', monospace;
-  font-size: 0.95rem;
-  font-weight: 600;
-  color: #FFFFFF;
-}
-
-.vendor-error-badge {
-  font-family: 'IBM Plex Mono', monospace;
-  font-size: 0.72rem;
-  padding: 2px 6px;
-  border-radius: var(--radius-sharp);
-  text-transform: uppercase;
-  font-weight: 600;
-}
-
-.badge-sev-error {
-  background-color: rgba(255, 77, 90, 0.15);
-  color: var(--phosphor-red);
-  border: 1px solid rgba(255, 77, 90, 0.4);
-}
-
-.badge-sev-warn {
-  background-color: rgba(255, 179, 71, 0.15);
-  color: var(--phosphor-amber);
-  border: 1px solid rgba(255, 179, 71, 0.4);
-}
-
-.badge-sev-info {
-  background-color: rgba(52, 245, 164, 0.15);
-  color: var(--phosphor-green);
-  border: 1px solid rgba(52, 245, 164, 0.4);
+.stTabs [aria-selected="true"], div[data-baseweb="tab"][aria-selected="true"] {
+  color: var(--p-green) !important;
+  border-bottom: 2px solid var(--p-green) !important;
+  background: transparent !important;
 }
 
 /* Dataframe and Tables */
 div[data-testid="stDataFrame"] {
-  border: 1px solid var(--border-crisp) !important;
+  border: 1px solid var(--border) !important;
   border-radius: var(--radius-sharp) !important;
+  width: 100% !important;
+}
+
+/* Sidebar Styling */
+section[data-testid="stSidebar"] {
+  background-color: var(--surface) !important;
+  border-right: 1px solid var(--border) !important;
+}
+
+/* Legacy & Helper Classes */
+.hud-kpi-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.hud-kpi-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  padding: 10px 14px;
+  border-radius: 3px;
+}
+.badge-epistemic {
+  padding: 14px 18px;
+  border-radius: 3px;
+  border-left-width: 4px;
+  border-left-style: solid;
+  margin-bottom: 16px;
+  background: var(--surface);
+}
+.pill-verified {
+  background: rgba(52, 245, 164, 0.12);
+  color: var(--p-green);
+  border: 1px solid rgba(52, 245, 164, 0.35);
+  padding: 2px 6px;
+  border-radius: 2px;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.75rem;
+}
+.pill-unverified {
+  background: rgba(255, 77, 90, 0.12);
+  color: var(--p-red);
+  border: 1px solid rgba(255, 77, 90, 0.35);
+  padding: 2px 6px;
+  border-radius: 2px;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.75rem;
+}
+.pill-vendor-code {
+  background: rgba(92, 225, 230, 0.12);
+  color: var(--p-cyan);
+  border: 1px solid rgba(92, 225, 230, 0.35);
+  padding: 2px 6px;
+  border-radius: 2px;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.75rem;
 }

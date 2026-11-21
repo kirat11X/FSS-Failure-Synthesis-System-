@@ -1,0 +1,48 @@
+# FSS decoder schema for D5 Warehouse Robots domain
+schema_set: d5_warehouse_robots
+
+enums:
+  replan_reason:
+    0: ROUTE_BLOCKED
+    1: OBSTACLE_DETECTED
+    2: LOW_BATTERY
+  task_state:
+    0: ASSIGNED
+    1: IN_PROGRESS
+    2: COMPLETED
+    3: ABORTED
+    4: DELAYED
+
+event_types:
+  0x0601:
+    name: BATTERY
+    version: 1
+    fields:
+      - {name: robot_id,   offset: 0, type: u16,  size: 2, endian: little}
+      - {name: voltage_v,  offset: 2, type: f32,  size: 4, endian: little}
+      - {name: charge_pct, offset: 6, type: u8,   size: 1}
+      - {name: critical,   offset: 7, type: bool, size: 1}
+
+  0x0602:
+    name: NAV_STATE
+    version: 1
+    fields:
+      - {name: robot_id, offset: 0,  type: u16,  size: 2, endian: little}
+      - {name: x_mm,     offset: 2,  type: i32,  size: 4, endian: little}
+      - {name: y_mm,     offset: 6,  type: i32,  size: 4, endian: little}
+      - {name: blocked,  offset: 10, type: bool, size: 1}
+
+  0x0603:
+    name: REPLAN
+    version: 1
+    fields:
+      - {name: robot_id,    offset: 0, type: u16, size: 2, endian: little}
+      - {name: reason_code, offset: 2, type: u8,  size: 1, enum: replan_reason, enum_field: reason}
+
+  0x0604:
+    name: TASK_STATE
+    version: 1
+    fields:
+      - {name: robot_id, offset: 0, type: u16, size: 2, endian: little}
+      - {name: task_id,  offset: 2, type: u32, size: 4, endian: little}
+      - {name: state,    offset: 6, type: u8,  size: 1, enum: task_state, enum_field: state_name}

@@ -15,6 +15,8 @@ Background:
 from __future__ import annotations
 
 import concurrent.futures
+import json
+import subprocess
 import tempfile
 import time
 import unittest
@@ -149,3 +151,111 @@ class TestBlockStoreConcurrency(unittest.TestCase):
         finally:
             store_path.unlink(missing_ok=True)
             lock_path.unlink(missing_ok=True)
+
+    def test_segment_compaction(self):
+        """DynamicSegmentCompactor correctly compacts sealed segments, recycles expired data, preserves block integrity and does not interfere with active operations."""
+        with tempfile.NamedTemporaryFile(prefix="test_compaction_store_", suffix=".dat", delete=False) as f:
+            store_path = Path(f.name)
+        lock_path = store_path.with_suffix(store_path.suffix + ".lock")
+
+        fixtures: list[Path] = []
+        base_ts = 1791454020000000000
+
+        try:
+            retriever = JavaRetriever(store_path, mode="cli")
+
+            # 1. Create 3 blocks for source 200 by writing 3 records each ~40KB (> 65536 / 2 bytes)
+            # Blocks 0 and 1 will be sealed; Block 2 will be the active block.
+            p1 = b"SEALED_EXPIRED_PAYLOAD_A" * 1500  # ~36 KB
+            p2 = b"SEALED_RETAINED_PAYLOAD_B" * 1500 # ~36 KB
+            p3 = b"ACTIVE_BLOCK_PAYLOAD_C" * 1500     # ~36 KB
+
+            f1 = store_path.parent / f"fix_c1_{int(time.time()*1000)}.bin"
+            f1.write_bytes(encode_envelope(EventRecord(200, base_ts, 1, p1)))
+            fixtures.append(f1)
+
+            f2 = store_path.parent / f"fix_c2_{int(time.time()*1000)}.bin"
+            f2.write_bytes(encode_envelope(EventRecord(200, base_ts + 2000, 1, p2)))
+            fixtures.append(f2)
+
+            f3 = store_path.parent / f"fix_c3_{int(time.time()*1000)}.bin"
+            f3.write_bytes(encode_envelope(EventRecord(200, base_ts + 4000, 1, p3)))
+            fixtures.append(f3)
+
+            retriever.ingest(f1, f2, f3)
+
+            initial_size = store_path.stat().st_size
+            self.assertEqual(
+                initial_size % BLOCK_SIZE,
+                0,
+                f"Initial store size {initial_size} must be aligned to {BLOCK_SIZE} bytes",
+            )
+            self.assertEqual(initial_size // BLOCK_SIZE, 3, "Expected 3 allocated 64KB blocks")
+
+            # 2. Run DynamicSegmentCompactor with cutoff = base_ts + 1000
+            # f1 (ts = base_ts) is prior to cutoff -> expired and purged from sealed block.
+            # f2 (ts = base_ts + 2000) >= cutoff -> retained in sealed block.
+            # f3 (ts = base_ts + 4000) -> active block, preserved untouched.
+            cutoff = base_ts + 1000
+            cmd = [
+                retriever.java_bin,
+                "-cp",
+                retriever.classpath,
+                "Storage.DynamicSegmentCompactor",
+                "compact",
+                "--store",
+                str(store_path),
+                "--cutoff",
+                str(cutoff),
+            ]
+            comp_res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            res_json = json.loads(comp_res.stdout.strip())
+
+            self.assertEqual(res_json.get("status"), "OK")
+            self.assertEqual(res_json.get("initial_blocks"), 3)
+            self.assertEqual(res_json.get("compacted_blocks"), 2)
+            self.assertEqual(res_json.get("bytes_reclaimed"), BLOCK_SIZE)
+            self.assertEqual(res_json.get("records_preserved"), 2)
+            self.assertEqual(res_json.get("segments_recycled"), 1)
+
+            # 3. Verify block boundary integrity after compaction
+            compacted_size = store_path.stat().st_size
+            self.assertEqual(
+                compacted_size % BLOCK_SIZE,
+                0,
+                f"Compacted store size {compacted_size} must be an exact multiple of {BLOCK_SIZE}",
+            )
+            self.assertEqual(compacted_size, 2 * BLOCK_SIZE)
+
+            # 4. Read back and verify retention and CRC-32C integrity
+            env = retriever.retrieve_envelope(200, base_ts, base_ts + 10000, max_events=10)
+            self.assertEqual(env.status, "OK")
+            self.assertEqual(len(env.events), 2)
+            self.assertEqual(env.events[0].timestamp_ns, base_ts + 2000)
+            self.assertEqual(env.events[0].payload_bytes, p2)
+            self.assertEqual(env.events[1].timestamp_ns, base_ts + 4000)
+            self.assertEqual(env.events[1].payload_bytes, p3)
+
+            # 5. Non-interference with active operations: append a new record to the compacted store
+            f4 = store_path.parent / f"fix_c4_{int(time.time()*1000)}.bin"
+            p4 = b"POST_COMPACTION_ACTIVE_RECORD"
+            f4.write_bytes(encode_envelope(EventRecord(200, base_ts + 6000, 1, p4)))
+            fixtures.append(f4)
+
+            retriever.ingest(f4)
+
+            # Verify all unexpired plus newly appended records exist
+            env_after = retriever.retrieve_envelope(200, base_ts, base_ts + 10000, max_events=10)
+            self.assertEqual(env_after.status, "OK")
+            self.assertEqual(len(env_after.events), 3)
+            self.assertEqual(
+                [e.timestamp_ns for e in env_after.events],
+                [base_ts + 2000, base_ts + 4000, base_ts + 6000],
+            )
+            self.assertEqual(env_after.events[2].payload_bytes, p4)
+
+        finally:
+            store_path.unlink(missing_ok=True)
+            lock_path.unlink(missing_ok=True)
+            for fix_p in fixtures:
+                fix_p.unlink(missing_ok=True)

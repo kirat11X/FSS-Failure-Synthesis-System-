@@ -1,0 +1,20 @@
+{
+  "scenario": "nominal",
+  "description": "Nominal formation patrol across 4 drones with zero faults, stable attitudes, and healthy battery telemetry.",
+  "seed": 42,
+  "base_timestamp_ns": 1791454020000000000,
+  "agents": [
+    101,
+    102,
+    103,
+    104
+  ],
+  "faults_injected": 0,
+  "status": "NOMINAL",
+  "output_file": "/home/kirat/coding/minor/test_data/simulated/nominal.fss.bin",
+  "total_events": 400,
+  "time_start_ns": 1791454020000000000,
+  "time_end_ns": 1791454024836000000,
+  "time_start_iso": "2026-10-08T10:07:00.000000000Z",
+  "time_end_iso": "2026-10-08T10:07:04.836000000Z"
+}

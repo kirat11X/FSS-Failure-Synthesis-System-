@@ -1,0 +1,45 @@
+{
+  "scenario": "sc5_clock_skew",
+  "description": "Clock skew causality trap: Agent 12 battery failure caused Agent 7 avoidance, but Agent 7 uncompensated clock skew (-150ms) makes Agent 7's action appear earlier in producer timestamps.",
+  "seed": 42,
+  "base_timestamp_ns": 1791454020000000000,
+  "agents": [
+    7,
+    12
+  ],
+  "clock_offsets_ns": {
+    "12": 0,
+    "7": -150000000
+  },
+  "ground_truth_causality": {
+    "cause": {
+      "source_id": 12,
+      "event": "BATTERY_CRITICAL",
+      "true_time_ns": 1791454020000000000,
+      "producer_timestamp_ns": 1791454020000000000
+    },
+    "effect": {
+      "source_id": 7,
+      "event": "AVOIDANCE_REPLAN",
+      "true_time_ns": 1791454020050000000,
+      "producer_timestamp_ns": 1791454019900000000
+    },
+    "apparent_producer_order": [
+      "7:AVOIDANCE",
+      "7:FORMATION_STATE",
+      "12:BATTERY_CRITICAL"
+    ],
+    "true_physical_order": [
+      "12:BATTERY_CRITICAL",
+      "7:AVOIDANCE",
+      "7:FORMATION_STATE"
+    ],
+    "causality_warning": "No causation can be inferred from raw producer timestamps alone without clock synchronization verification."
+  },
+  "output_file": "/home/kirat/coding/minor/test_data/simulated/sc5_clock_skew.fss.bin",
+  "total_events": 7,
+  "time_start_ns": 1791454019500000000,
+  "time_end_ns": 1791454020200000000,
+  "time_start_iso": "2026-10-08T10:06:59.500000000Z",
+  "time_end_iso": "2026-10-08T10:07:00.200000000Z"
+}

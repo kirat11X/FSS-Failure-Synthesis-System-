@@ -1,0 +1,83 @@
+# FSS decoder schema for MAVLink Common v0 messages
+schema_set: mavlink_common
+
+enums: {}
+
+event_types:
+  0:
+    name: HEARTBEAT
+    version: 1
+    fields:
+      - {name: custom_mode,     offset: 0, type: u32, size: 4, endian: little}
+      - {name: type,            offset: 4, type: u8,  size: 1}
+      - {name: autopilot,       offset: 5, type: u8,  size: 1}
+      - {name: base_mode,       offset: 6, type: u8,  size: 1}
+      - {name: system_status,   offset: 7, type: u8,  size: 1}
+      - {name: mavlink_version, offset: 8, type: u8,  size: 1}
+
+  1:
+    name: SYS_STATUS
+    version: 1
+    fields:
+      - {name: onboard_control_sensors_present, offset: 0,  type: u32, size: 4, endian: little}
+      - {name: onboard_control_sensors_enabled, offset: 4,  type: u32, size: 4, endian: little}
+      - {name: onboard_control_sensors_health,  offset: 8,  type: u32, size: 4, endian: little}
+      - {name: load,                            offset: 12, type: u16, size: 2, endian: little}
+      - {name: voltage_battery,                 offset: 14, type: u16, size: 2, endian: little}
+      - {name: current_battery,                 offset: 16, type: i16, size: 2, endian: little}
+      - {name: drop_rate_comm,                  offset: 18, type: u16, size: 2, endian: little}
+      - {name: errors_comm,                     offset: 20, type: u16, size: 2, endian: little}
+      - {name: errors_count1,                   offset: 22, type: u16, size: 2, endian: little}
+      - {name: errors_count2,                   offset: 24, type: u16, size: 2, endian: little}
+      - {name: errors_count3,                   offset: 26, type: u16, size: 2, endian: little}
+      - {name: errors_count4,                   offset: 28, type: u16, size: 2, endian: little}
+      - {name: battery_remaining,               offset: 30, type: i8,  size: 1}
+
+  24:
+    name: GPS_RAW_INT
+    version: 1
+    fields:
+      - {name: time_usec,          offset: 0,  type: u64, size: 8, endian: little}
+      - {name: lat,                offset: 8,  type: i32, size: 4, endian: little}
+      - {name: lon,                offset: 12, type: i32, size: 4, endian: little}
+      - {name: alt,                offset: 16, type: i32, size: 4, endian: little}
+      - {name: eph,                offset: 20, type: u16, size: 2, endian: little}
+      - {name: epv,                offset: 22, type: u16, size: 2, endian: little}
+      - {name: vel,                offset: 24, type: u16, size: 2, endian: little}
+      - {name: cog,                offset: 26, type: u16, size: 2, endian: little}
+      - {name: fix_type,           offset: 28, type: u8,  size: 1}
+      - {name: satellites_visible, offset: 29, type: u8,  size: 1}
+
+  30:
+    name: ATTITUDE
+    version: 1
+    fields:
+      - {name: time_boot_ms, offset: 0,  type: u32, size: 4, endian: little}
+      - {name: roll,         offset: 4,  type: f32, size: 4, endian: little}
+      - {name: pitch,        offset: 8,  type: f32, size: 4, endian: little}
+      - {name: yaw,          offset: 12, type: f32, size: 4, endian: little}
+      - {name: rollspeed,    offset: 16, type: f32, size: 4, endian: little}
+      - {name: pitchspeed,   offset: 20, type: f32, size: 4, endian: little}
+      - {name: yawspeed,     offset: 24, type: f32, size: 4, endian: little}
+
+  33:
+    name: GLOBAL_POSITION_INT
+    version: 1
+    fields:
+      - {name: time_boot_ms,  offset: 0,  type: u32, size: 4, endian: little}
+      - {name: lat,           offset: 4,  type: i32, size: 4, endian: little}
+      - {name: lon,           offset: 8,  type: i32, size: 4, endian: little}
+      - {name: alt,           offset: 12, type: i32, size: 4, endian: little}
+      - {name: relative_alt,  offset: 16, type: i32, size: 4, endian: little}
+      - {name: vx,            offset: 20, type: i16, size: 2, endian: little}
+      - {name: vy,            offset: 22, type: i16, size: 2, endian: little}
+      - {name: vz,            offset: 24, type: i16, size: 2, endian: little}
+      - {name: hdg,           offset: 26, type: u16, size: 2, endian: little}
+
+  253:
+    name: STATUSTEXT
+    version: 1
+    fields:
+      - {name: severity,  offset: 0, type: u8,  size: 1}
+      - {name: id,        offset: 1, type: u16, size: 2, endian: little}
+      - {name: chunk_seq, offset: 3, type: u8,  size: 1}

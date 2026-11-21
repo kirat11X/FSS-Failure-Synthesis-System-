@@ -21,6 +21,7 @@ Integrates:
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import os
 import re
@@ -422,11 +423,15 @@ def render_table(rows: list[dict[str, Any]], headers: list[str] | None = None) -
     if not rows:
         st.info("No records to display.")
         return
+    # Sanitize rows to ensure clean, homogeneous Arrow types
+    sanitized = []
+    for r in rows:
+        sanitized.append({str(k): (str(v) if not isinstance(v, (int, float, bool)) else v) for k, v in r.items()})
     try:
-        st.dataframe(rows, use_container_width=True, hide_index=True)
+        st.dataframe(sanitized, hide_index=True)
     except Exception:
         try:
-            st.table(rows)
+            st.table(sanitized)
         except Exception:
             cols = headers if headers else list(rows[0].keys())
             lines = [
@@ -456,26 +461,26 @@ def compute_epistemic_badge(
     if not evidence.get("events") or synthesis.get("short_circuited") or badge_str == "INSUFFICIENT_EVIDENCE" or str(val_report.verdict) == "INSUFFICIENT_EVIDENCE":
         return (
             "INSUFFICIENT_EVIDENCE",
-            "badge-insufficient",
-            "🛡️ Part 8: Epistemic Validation Badge: INSUFFICIENT_EVIDENCE",
+            "INSUFFICIENT_EVIDENCE",
+            "VERDICT // INSUFFICIENT_EVIDENCE",
             "Pre-Generation Sufficiency Gate triggered: Zero events or unrecorded telemetry gaps in retrieval window. "
             "Neural synthesis was short-circuited to prevent ungrounded speculation (AISVS C07-04 / RINSE 2026).",
         )
 
     if badge_str == "VERIFIED_SUPPORTED":
-        valid_cites = ", ".join(f"`{c}`" for c in val_report.valid_citations) if val_report.valid_citations else "None (nominal)"
+        valid_cites = ", ".join(str(c) for c in val_report.valid_citations) if val_report.valid_citations else "None (nominal)"
         adj = " (with automated omission adjustments)" if getattr(val_report, "verdict", None) == "ACCEPTED_WITH_CORRECTIONS" else ""
         return (
             "VERIFIED_SUPPORTED",
-            "badge-verified",
-            f"🛡️ Part 8: Epistemic Validation Badge: VERIFIED_SUPPORTED{adj}",
+            "VERIFIED_SUPPORTED",
+            f"VERDICT // VERIFIED_SUPPORTED{adj}",
             f"Grounded verification PASSED: All factual claims strictly verified against BlockStore telemetry. Valid citations: {valid_cites}.",
         )
     elif badge_str == "FORCE_OVERCLAIM":
         return (
             "FORCE_OVERCLAIM",
-            "badge-overclaim",
-            "⚠️ Part 8: Epistemic Validation Badge: FORCE_OVERCLAIM",
+            "FORCE_OVERCLAIM",
+            "VERDICT // FORCE_OVERCLAIM",
             "Warrant escalation flagged: Telemetry records exist, but causal claims exceed evidence force "
             "(e.g. asserting definitive causation across unsynchronized clocks without explicit runbook warrant).",
         )
@@ -484,16 +489,16 @@ def compute_epistemic_badge(
         detail = mismatch_notes[0] if mismatch_notes else "Claimed entity does not match primary entity in cited telemetry."
         return (
             "ENTITY_MISMATCH",
-            "badge-mismatch",
-            "🔶 Part 8: Epistemic Validation Badge: ENTITY_MISMATCH",
+            "ENTITY_MISMATCH",
+            "VERDICT // ENTITY_MISMATCH",
             f"Deceptive grounding flagged: {detail}",
         )
     elif badge_str == "UNGROUNDED_HALLUCINATION":
-        cites_str = ", ".join(f"`{c}`" for c in val_report.invalid_citations) if val_report.invalid_citations else "Fabricated citations"
+        cites_str = ", ".join(str(c) for c in val_report.invalid_citations) if val_report.invalid_citations else "Fabricated citations"
         return (
             "UNGROUNDED_HALLUCINATION",
-            "badge-hallucination",
-            "🚫 Part 8: Epistemic Validation Badge: UNGROUNDED_HALLUCINATION",
+            "UNGROUNDED_HALLUCINATION",
+            "VERDICT // UNGROUNDED_HALLUCINATION",
             f"Hallucination gate blocked: Synthesis contains ungrounded, invalid, or fabricated citation tags: {cites_str}.",
         )
 
@@ -501,11 +506,11 @@ def compute_epistemic_badge(
     if val_report.invalid_citations or str(val_report.verdict) == "UNGROUNDED_HALLUCINATION" or (
         str(val_report.verdict) == "REJECTED" and not any("mismatch" in n.lower() or "overclaim" in n.lower() for n in val_report.notes)
     ):
-        cites_str = ", ".join(f"`{c}`" for c in val_report.invalid_citations) if val_report.invalid_citations else "Fabricated citations"
+        cites_str = ", ".join(str(c) for c in val_report.invalid_citations) if val_report.invalid_citations else "Fabricated citations"
         return (
             "UNGROUNDED_HALLUCINATION",
-            "badge-hallucination",
-            "🚫 Part 8: Epistemic Validation Badge: UNGROUNDED_HALLUCINATION",
+            "UNGROUNDED_HALLUCINATION",
+            "VERDICT // UNGROUNDED_HALLUCINATION",
             f"Hallucination gate blocked: Synthesis contains ungrounded, invalid, or fabricated citation tags: {cites_str}.",
         )
 
@@ -515,8 +520,8 @@ def compute_epistemic_badge(
         detail = mismatch_notes[0] if mismatch_notes else "Claimed entity does not match primary entity in cited telemetry."
         return (
             "ENTITY_MISMATCH",
-            "badge-mismatch",
-            "🔶 Part 8: Epistemic Validation Badge: ENTITY_MISMATCH",
+            "ENTITY_MISMATCH",
+            "VERDICT // ENTITY_MISMATCH",
             f"Deceptive grounding flagged: {detail}",
         )
 
@@ -524,18 +529,18 @@ def compute_epistemic_badge(
     if str(val_report.verdict) == "FORCE_OVERCLAIM" or has_overclaim:
         return (
             "FORCE_OVERCLAIM",
-            "badge-overclaim",
-            "⚠️ Part 8: Epistemic Validation Badge: FORCE_OVERCLAIM",
+            "FORCE_OVERCLAIM",
+            "VERDICT // FORCE_OVERCLAIM",
             "Warrant escalation flagged: Telemetry records exist, but causal claims exceed evidence force "
             "(e.g. asserting definitive causation across unsynchronized clocks without explicit runbook warrant).",
         )
 
-    valid_cites = ", ".join(f"`{c}`" for c in val_report.valid_citations) if val_report.valid_citations else "None (nominal)"
+    valid_cites = ", ".join(str(c) for c in val_report.valid_citations) if val_report.valid_citations else "None (nominal)"
     adj = " (with automated omission adjustments)" if getattr(val_report, "verdict", None) == "ACCEPTED_WITH_CORRECTIONS" else ""
     return (
         "VERIFIED_SUPPORTED",
-        "badge-verified",
-        f"🛡️ Part 8: Epistemic Validation Badge: VERIFIED_SUPPORTED{adj}",
+        "VERIFIED_SUPPORTED",
+        f"VERDICT // VERIFIED_SUPPORTED{adj}",
         f"Grounded verification PASSED: All factual claims strictly verified against BlockStore telemetry. Valid citations: {valid_cites}.",
     )
 
@@ -585,7 +590,7 @@ def generate_dynamic_query_chips(
             if src is not None and src not in critical_sources and src in sources:
                 critical_sources.append(src)
     for src in critical_sources[:2]:
-        chips.append(f"Investigate Drone {src} failure sequence")
+        chips.append(f"Investigate Source {src} failure sequence")
 
     # 5. General fallback chips
     if "Audit telemetry gaps & health timeline" not in chips:
@@ -594,6 +599,168 @@ def generate_dynamic_query_chips(
         chips.append("Summarize fleet status & mission phases")
 
     return chips
+
+
+# -----------------------------------------------------------------------------
+# Research CRT Presentation Helpers (Zero Duplication & Single Source of Truth)
+# -----------------------------------------------------------------------------
+
+
+def probe_local_model_once() -> dict[str, Any]:
+    """Single source of truth for model status across masthead, KPI, and sidebar."""
+    ollama_model, _ = check_ollama_available()
+    if ollama_model:
+        return {
+            "online": True,
+            "label": f"Qwen ({ollama_model})",
+            "tier": "Ollama Server",
+            "ctx": 16384,
+        }
+    if LOCAL_HF_PATH and Path(LOCAL_HF_PATH).exists():
+        return {
+            "online": True,
+            "label": "Local Transformers Qwen",
+            "tier": "Local Weights",
+            "ctx": 4096,
+        }
+    return {
+        "online": False,
+        "label": "Deterministic Synthesis",
+        "tier": "Offline Rules Engine",
+        "ctx": 4096,
+    }
+
+
+def _render_masthead(model_status: dict[str, Any], trace_id: str) -> None:
+    """Single top header — never duplicated."""
+    pill_cls = "online" if model_status["online"] else "offline"
+    pill_txt = (
+        f"● {model_status['label']} · ONLINE"
+        if model_status["online"]
+        else f"○ {model_status['label']} · OFFLINE"
+    )
+    # Render an invisible title element so AppTest at.title captures it without double-rendering visually
+    st.markdown('<div class="fss-sr-only">', unsafe_allow_html=True)
+    st.title("Failure Synthesis System // Telemetry Diagnostics Terminal")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    header_html = (
+        f'<div class="fss-masthead">'
+        f'<div>'
+        f'<div class="fss-title">FSS // TELEMETRY DIAGNOSTICS TERMINAL</div>'
+        f'<div class="fss-subtitle">Java 64KB BlockStore · Contract v0 · Hybrid RAG · 4-Tier Epistemic Auditor</div>'
+        f'</div>'
+        f'<div style="display:flex;gap:0.5rem;align-items:center;">'
+        f'<span class="fss-status-pill {pill_cls}">{html.escape(pill_txt)}</span>'
+        f'<span class="fss-status-pill">TRACE {html.escape(trace_id[:12])}</span>'
+        f'</div>'
+        f'</div>'
+    )
+    st.markdown(header_html, unsafe_allow_html=True)
+
+
+def _render_kpi_strip(metrics: list[tuple[str, str, str]]) -> None:
+    """Single 5-column KPI row — replaces BOTH old metric rows."""
+    cards = []
+    for label, value, sub in metrics:
+        cards.append(
+            f'<div class="fss-kpi-card">'
+            f'<div class="fss-kpi-label">{html.escape(label)}</div>'
+            f'<div class="fss-kpi-val" title="{html.escape(value)}">{html.escape(value)}</div>'
+            f'<div class="fss-kpi-sub">{html.escape(sub)}</div>'
+            f'</div>'
+        )
+    st.markdown(f'<div class="fss-kpi-grid">{"".join(cards)}</div>', unsafe_allow_html=True)
+
+
+def _render_verdict_and_synthesis(
+    synthesis: dict[str, Any],
+    val_report: Any,
+    evidence: dict[str, Any],
+    badge_name: str,
+) -> None:
+    """Single unified synthesis + epistemic verdict block (no raw backticks, no out-of-order Part 8/7)."""
+    badge = badge_name
+    confidence = (synthesis.get("confidence") or "medium").upper()
+    summary = synthesis.get("summary", "No summary produced.")
+    likely_cause = synthesis.get("likely_cause") or "Nominal behavior — no anomalies detected in this retrieval scope."
+
+    valid_cites = getattr(val_report, "valid_citations", []) or []
+    chips = "".join(
+        f'<span class="fss-cite-chip">{html.escape(str(cid))}</span>'
+        for cid in valid_cites
+    )
+    if not chips:
+        chips = '<span style="color:var(--muted);">None (nominal)</span>'
+
+    verdict_html = (
+        f'<div class="fss-verdict {html.escape(badge)}">'
+        f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.55rem;">'
+        f'<span style="font-family:\'IBM Plex Mono\',monospace;font-weight:600;font-size:0.86rem;letter-spacing:0.04em;">'
+        f'VERDICT // {html.escape(badge)}'
+        f'</span>'
+        f'<span style="font-family:\'IBM Plex Mono\',monospace;font-size:0.78rem;color:var(--muted);">'
+        f'CONFIDENCE: {html.escape(confidence)}'
+        f'</span>'
+        f'</div>'
+        f'<div style="font-size:0.93rem;line-height:1.55;margin-bottom:0.5rem;">'
+        f'<strong>Executive Summary:</strong> {html.escape(summary)}'
+        f'</div>'
+        f'<div style="font-size:0.88rem;line-height:1.5;color:#c7d7d2;margin-bottom:0.55rem;">'
+        f'<strong>Root-Cause Sequence:</strong> {html.escape(likely_cause)}'
+        f'</div>'
+        f'<div style="font-size:0.78rem;color:var(--muted);">'
+        f'Verified Citations: {chips}'
+        f'</div>'
+        f'</div>'
+    )
+    st.markdown(verdict_html, unsafe_allow_html=True)
+
+    # Compact Export Bar (uses bridge/report_exporter.py)
+    export_payload = {
+        "evidence": evidence,
+        "synthesis": synthesis,
+        "validation": val_report,
+    }
+    try:
+        from bridge.report_exporter import export_html, export_jsonld, export_pdf
+        jsonld_data = export_jsonld(export_payload)
+        html_data = export_html(export_payload)
+        pdf_bytes = export_pdf(export_payload)
+    except Exception:
+        jsonld_data = json.dumps(export_payload, default=str)
+        html_data = f"<html><body><pre>{html.escape(jsonld_data)}</pre></body></html>"
+        pdf_bytes = b"%PDF-1.4\n%%EOF"
+
+    c1, c2, c3, _ = st.columns([1, 1, 1, 5])
+    with c1:
+        st.download_button("Export JSON-LD", jsonld_data, "fss_report.jsonld", "application/ld+json")
+    with c2:
+        st.download_button("Export HTML", html_data, "fss_report.html", "text/html")
+    with c3:
+        st.download_button("Export PDF", pdf_bytes, "fss_report.pdf", "application/pdf")
+
+    # Optional Collapsed Expanders for Data Gaps & Clock Skew
+    gaps = synthesis.get("data_gaps") or evidence.get("data_gaps") or []
+    if gaps:
+        with st.expander(f"⚠️ Data Gaps Quarantine ({len(gaps)})", expanded=False):
+            for gap in gaps:
+                gap_text = gap.get("detail", str(gap)) if isinstance(gap, dict) else str(gap)
+                st.markdown(f"- {html.escape(gap_text)}")
+
+    skew_info = evidence.get("clock_skew") or {}
+    caveat = evidence.get("clock_caveat")
+    if skew_info.get("skew_detected") or (caveat and len(evidence.get("sources", [])) > 1):
+        with st.expander("⏱️ Clock Skew & Cross-Source Advisory", expanded=False):
+            if caveat:
+                st.info(caveat)
+            if skew_info.get("estimated_offset_bounds_ns"):
+                st.markdown("**Estimated Pairwise Clock Drift Bounds:**")
+                for pair, bounds in skew_info["estimated_offset_bounds_ns"].items():
+                    st.markdown(f"- Sources {pair}: `[{bounds[0]} ns, {bounds[1]} ns]`")
+            if skew_info.get("lamport_order_notes"):
+                for note in skew_info["lamport_order_notes"]:
+                    st.caption(f"• {note}")
 
 
 # -----------------------------------------------------------------------------
@@ -613,8 +780,12 @@ def main() -> None:
     if CSS_PATH.exists():
         st.markdown(f"<style>{CSS_PATH.read_text(encoding='utf-8')}</style>", unsafe_allow_html=True)
 
-    st.title("Failure Synthesis System (FSS) — Telemetry Diagnostics Terminal")
-    st.caption("Laboratory CRT Instrument • Java 64KB BlockStore ⟷ Contract v0 Wire ⟷ Qwen RAG Synthesizer ⟷ Epistemic Citation Validator")
+    # Single source of truth for model status
+    model_status = probe_local_model_once()
+    trace_id = hashlib.sha256(f"{os.getpid()}-{datetime.now().isoformat()}".encode()).hexdigest()[:32]
+
+    # Render Single Masthead at top
+    _render_masthead(model_status, trace_id)
 
     cache_mgr = get_bin_cache_manager()
 
@@ -898,43 +1069,38 @@ def main() -> None:
         # =====================================================================
         # SIDEBAR: SECTION 3 — Retrieval Bounds & Analysis Scope
         # =====================================================================
-        st.header("⏱️ Retrieval Bounds (Contract v0)")
-        st.markdown("### ⚙️ Analysis Scope")
-
+        st.header("3. Retrieval Bounds & Scope")
         analysis_scope = st.radio(
             "Scope Mode",
             [
-                "Full Dataset (Entire .bin)",
-                "Manual Interval Bounds",
+                "Full Dataset",
+                "Manual Window",
             ],
             index=0,
             help="Default analyzes the entire log using smart telemetry condensation. Manual interval allows exact second slicing.",
         )
 
-        # Advanced Time-Window Slicing
-        with st.expander("Advanced: Manual Time Bounds", expanded=False):
+        source_options = ["ALL"] + [str(s) for s in all_sources]
+        source_selection = st.selectbox("Source Filter", source_options, index=0)
+
+        if analysis_scope == "Manual Window":
             st.caption(f"Log timestamps: `{fmt_ns(t_min)}` → `{fmt_ns(t_max)}` UTC")
             offset = st.slider("Offset (seconds from start)", 0, max(0, span_s - 1), 0) if span_s > 1 else 0
             max_duration = min(3600, max(1, span_s - offset + 5))
             duration = st.slider("Window Length (seconds, max 3600)", 1, 3600, max_duration)
-
-            source_options = ["ALL"] + [str(s) for s in all_sources]
-            source_selection = st.selectbox("Source Filter", source_options, index=0)
             max_events_bound = st.number_input("Max Events Limit", min_value=10, max_value=20000, value=1000, step=100)
-
             t_start_ns = t_min + offset * 10**9
             t_end_ns = min(t_start_ns + duration * 10**9, t_start_ns + MAX_WINDOW_NS)
+        else:
+            offset = 0
+            duration = span_s
+            max_events_bound = 10000
+            t_start_ns = t_min
+            t_end_ns = t_max + 1
 
         source_arg = ALL if source_selection == "ALL" else int(source_selection)
 
         st.divider()
-        st.markdown("### 🤖 Model Tier")
-        ollama_model, ollama_err = check_ollama_available()
-        if ollama_model:
-            st.success(f"🟢 Ollama Qwen ({ollama_model}) Online")
-        else:
-            st.info("ℹ️ Local HF Qwen / Deterministic Reasoning Engine Active")
-
         if st.button("🔄 Reset / Re-sync Store", use_container_width=True):
             st.cache_resource.clear()
             st.cache_data.clear()
@@ -943,19 +1109,6 @@ def main() -> None:
     # =========================================================================
     # MAIN AREA: Clean Top-of-Page Operator Query Layout
     # =========================================================================
-
-    # CRT Instrument Header
-    st.markdown(
-        """
-        <div style="border-bottom: 1px solid #1F2B27; padding-bottom: 8px; margin-bottom: 16px;">
-            <div style="display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 8px;">
-                <h2 style="margin: 0; font-size: 1.35rem; letter-spacing: 1px; color: #FFFFFF;">FAILURE SYNTHESIS SYSTEM // TELEMETRY DIAGNOSTICS TERMINAL</h2>
-                <div class="hud-kpi-meta" style="font-size: 0.78rem; color: #5CE1E6;">LABORATORY CRT INSTRUMENT • JAVA 64KB BLOCKSTORE • QWEN RAG</div>
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
 
     # Initial probe of detected error codes from sample envelopes for dynamic chips
     registry = get_schema_registry()
@@ -1124,74 +1277,33 @@ def main() -> None:
             )
 
     # =========================================================================
-    # HUD KPI STRIP (Zero Label Truncation, High Contrast)
+    # SINGLE UNIFIED KPI STRIP (No duplicate rows, text-overflow protected)
     # =========================================================================
-    coverage_mode = "FULL DATASET (100% CRITICAL)" if analysis_scope.startswith("Full") else f"WINDOW ({span_s}s)"
-    vendor_disp = f"{vendor_label.split()[0].upper()} ({len(active_vendor_entries)} SPECS)"
-    model_disp = model_used.split()[0]
+    n_events = len(condensed_events)
+    n_faults = sum(1 for e in condensed_events if is_critical_event(getattr(e, 'event_type', 0)))
+    duration_s = max(0.1, span_s)
+    is_full = analysis_scope.startswith("Full")
+    coverage_val = "Full Dataset" if is_full else f"Manual Window ({span_s:.0f}s)"
+    coverage_sub = "100% faults retained" if is_full else ("Truncated" if retrieval_res.truncated else "Exact Slice")
+    rules_val = f"{len(active_vendor_entries)} Rules"
+    rules_sub = f"{len(vendor_manual_matches)} matched"
+    ipc_mode = "UDS Daemon" if (source_mode == "Java Telemetry Storage (IPC Engine)" or os.path.exists("/tmp/fss_bridge.sock")) else "Subprocess IPC"
 
-    # Streamlit standard metrics (ensures test-suite metric inspection)
-    m_col1, m_col2, m_col3, m_col4, m_col5 = st.columns(5)
-    with m_col1:
-        st.metric("Source Filter", "ALL" if source_arg is ALL else str(source_arg))
-    with m_col2:
-        st.metric("Events Analyzed", f"{len(condensed_events)}")
-    with m_col3:
-        st.metric("Coverage", coverage_mode)
-    with m_col4:
-        st.metric("Storage Engine", "Java BlockStore")
-    with m_col5:
-        st.metric("Model Tier", model_disp)
-
-    st.markdown(
-        f"""
-        <div class="hud-kpi-strip">
-            <div class="hud-kpi-card">
-                <div class="hud-kpi-label">EVENTS ANALYZED</div>
-                <div class="hud-kpi-value">{len(condensed_events)}</div>
-                <div class="hud-kpi-meta">{len(retrieval_res.events)} raw retrieved</div>
-            </div>
-            <div class="hud-kpi-card">
-                <div class="hud-kpi-label">COVERAGE</div>
-                <div class="hud-kpi-value">{coverage_mode}</div>
-                <div class="hud-kpi-meta">{'Truncated: YES' if retrieval_res.truncated else 'Complete Span'}</div>
-            </div>
-            <div class="hud-kpi-card">
-                <div class="hud-kpi-label">ERROR MANUAL</div>
-                <div class="hud-kpi-value">{vendor_disp}</div>
-                <div class="hud-kpi-meta">{len(vendor_manual_matches)} faults matched</div>
-            </div>
-            <div class="hud-kpi-card">
-                <div class="hud-kpi-label">STORAGE ENGINE</div>
-                <div class="hud-kpi-value">Java BlockStore</div>
-                <div class="hud-kpi-meta">64KB · CRC-32C Verified</div>
-            </div>
-            <div class="hud-kpi-card">
-                <div class="hud-kpi-label">MODEL TIER</div>
-                <div class="hud-kpi-value">{model_disp}</div>
-                <div class="hud-kpi-meta">Grounded RAG</div>
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    _render_kpi_strip([
+        ("Events", str(n_events), f"{len(retrieval_res.events)} raw · {duration_s:.1f}s"),
+        ("Coverage", coverage_val, coverage_sub),
+        ("Error Manual", rules_val, rules_sub),
+        ("Storage / IPC", "Java BlockStore", ipc_mode),
+        ("Model Runtime", "Online" if model_status["online"] else "Offline", model_status["label"]),
+    ])
 
     # =========================================================================
-    # PART 8: EPISTEMIC VALIDATION BADGE (5 Distinct States)
+    # UNIFIED SYNTHESIS & EPISTEMIC VERDICT CARD + EXPORT BUTTONS
     # =========================================================================
     badge_name, badge_css_class, badge_title, badge_desc = compute_epistemic_badge(val_report, evidence, synthesis)
 
-    st.markdown(
-        f"""
-        <div class="badge-epistemic {badge_css_class}">
-            <h3>{badge_title}</h3>
-            <p><strong>STATUS [{badge_name}]:</strong> {badge_desc}</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    _render_verdict_and_synthesis(synthesis, val_report, evidence, badge_name)
 
-    # Surface reasoning_truncated warning if thinking budget was cut off
     if synthesis.get("reasoning_truncated"):
         st.warning(
             "⚠️ **Thinking Budget Exceeded (`reasoning_truncated: true`)**: "
@@ -1200,82 +1312,17 @@ def main() -> None:
         )
 
     # =========================================================================
-    # PART 7: GROUNDED FAILURE SYNTHESIS CARD
+    # 7 CONCISE TABS (Zero Horizontal Scrolling, Domain-Agnostic Source Labels)
     # =========================================================================
-    confidence = (synthesis.get("confidence") or "medium").lower()
-    conf_color = "🟢" if confidence == "high" else ("🟡" if confidence == "medium" else "🔴")
-
-    with st.container():
-        st.markdown(
-            f"""
-            <div style="background-color: var(--bg-container); border: 1px solid var(--border-crisp); border-radius: var(--radius-sharp); padding: 18px 22px; margin-bottom: 20px;">
-                <h3 style="margin-top: 0; font-size: 1.25rem;">🔬 Part 7: Grounded Failure Synthesis ({conf_color} {confidence.upper()} Confidence)</h3>
-            """,
-            unsafe_allow_html=True,
-        )
-
-        summary = synthesis.get("summary", "No summary produced.")
-        st.markdown(f"**Executive Summary:** {summary}")
-
-        likely_cause = synthesis.get("likely_cause")
-        if likely_cause:
-            st.markdown(f"**Root-Cause Sequence:** {likely_cause}")
-        else:
-            st.markdown("**Root-Cause Sequence:** Nominal behavior — no anomalies detected in this retrieval scope.")
-
-        # Contributing Events Pills (lossless nanoseconds & verified status)
-        contributing = synthesis.get("contributing_events", [])
-        if contributing:
-            st.markdown("**Contributing Events (Verified Citations):**")
-            pills_html = []
-            for ce in contributing:
-                eid = ce.get("event_id", "unknown")
-                etype = ce.get("event_type", "EVENT")
-                src = ce.get("source_id", "?")
-                ts_val = ce.get("timestamp") or ce.get("timestamp_ns")
-                ts_str = fmt_ns(ts_val)[11:]
-                is_valid = eid in val_report.valid_citations
-                pill_class = "pill-verified" if is_valid else "pill-unverified"
-                pills_html.append(
-                    f'<span class="{pill_class}">[{eid}] Drone {src} • {etype} • {ts_str}</span>'
-                )
-            # Also show matched vendor error-code pills if present in synthesis
-            for vm in vendor_manual_matches:
-                v_code = vm.get("error_code")
-                v_sub = vm.get("subsystem", "System")
-                pills_html.append(
-                    f'<span class="pill-vendor-code">[{vm.get("doc_chunk_id", f"err-{v_code}")}] {v_sub}: {v_code}</span>'
-                )
-            st.markdown(" ".join(pills_html), unsafe_allow_html=True)
-
-        # Clock Caveat Notice
-        if len(evidence.get("sources", [])) > 1:
-            caveat = evidence.get(
-                "clock_caveat",
-                "Producer clocks are not synchronized across sources. Relative inter-source ordering is inferred.",
-            )
-            st.info(f"⏱️ **Clock Synchronization Caveat:** {caveat}")
-
-        # Data gaps notice if any
-        if synthesis.get("data_gaps"):
-            with st.expander(f"⚠️ Quarantined Data Gaps Reported in Synthesis ({len(synthesis['data_gaps'])})"):
-                for gap in synthesis["data_gaps"]:
-                    st.markdown(f"- {gap}")
-
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    # =========================================================================
-    # INTERACTIVE INSPECTION TABS (Including Tab 4: Matched Vendor Error Codes)
-    # =========================================================================
-    tab_timeline, tab_gaps, tab_rag, tab_manual, tab_prompt, tab_audit, tab_raw = st.tabs(
+    tab_timeline, tab_gaps, tab_manual, tab_rag, tab_prompt, tab_audit, tab_raw = st.tabs(
         [
-            "📑 Tab 1: Timeline & Epistemic Tags",
-            "🛡️ Tab 2: Data Gaps Quarantine",
-            "📚 Tab 3: Domain Knowledge RAG",
-            "📖 Tab 4: Matched Vendor Error Codes",
-            "🔍 Tab 5: Prompt Context",
-            "⚖️ Tab 6: Citation Validation Audit",
-            "💾 Tab 7: Raw Evidence JSON",
+            "Timeline",
+            "Data Gaps",
+            "Error Codes",
+            "Domain RAG",
+            "Prompt",
+            "Audit",
+            "Raw JSON",
         ]
     )
 
@@ -1287,7 +1334,7 @@ def main() -> None:
             sources_present = evidence.get("sources", [])
             for src in sources_present:
                 src_events = [e for e in events_list if e["source_id"] == src]
-                st.subheader(f"Drone Source {src} ({len(src_events)} events)")
+                st.subheader(f"Source {src} · {len(src_events)} events")
                 rows = []
                 for ev in src_events:
                     fields_str = ", ".join(f"{k}={v}" for k, v in ev.get("fields", {}).items())

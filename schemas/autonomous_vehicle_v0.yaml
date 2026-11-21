@@ -1,0 +1,43 @@
+# FSS decoder schema for D4 Autonomous Vehicle (CAN-style, big-endian) domain
+schema_set: d4_autonomous_vehicle
+
+enums:
+  ecu_fault:
+    0: NO_FAULT
+    1: SENSOR_COMM_ERROR
+    2: ACTUATOR_FAULT
+    3: PLAUSIBILITY_CHECK_FAILED
+  abs_state:
+    0: NORMAL
+    1: ENGAGED
+    2: DISABLED
+    3: FAULT
+
+event_types:
+  0x0401:
+    name: WHEEL_SPEED
+    version: 1
+    fields:
+      - {name: wheel_id,  offset: 0, type: u8,  size: 1}
+      - {name: speed_kmh, offset: 1, type: f32, size: 4, endian: big}
+
+  0x0402:
+    name: ECU_FAULT
+    version: 1
+    fields:
+      - {name: ecu_id,     offset: 0, type: u16, size: 2, endian: big}
+      - {name: fault_code, offset: 2, type: u16, size: 2, endian: big, enum: ecu_fault, enum_field: fault_name}
+
+  0x0403:
+    name: ABS_STATE
+    version: 1
+    fields:
+      - {name: abs_state_code, offset: 0, type: u8,  size: 1, enum: abs_state, enum_field: abs_state_name}
+      - {name: slip_ratio,     offset: 1, type: f32, size: 4, endian: big}
+
+  0x0404:
+    name: DASH_WARNING
+    version: 1
+    fields:
+      - {name: warning_id, offset: 0, type: u8,   size: 1}
+      - {name: lamp_on,    offset: 1, type: bool, size: 1}

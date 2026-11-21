@@ -1,0 +1,41 @@
+# FSS decoder schema for D2 Microservices domain
+schema_set: d2_microservices
+
+enums:
+  pool_state:
+    0: HEALTHY
+    1: SATURATED
+    3: POOL_EXHAUSTED
+  http_status:
+    200: OK
+    400: BAD_REQUEST
+    404: NOT_FOUND
+    500: INTERNAL_SERVER_ERROR
+    503: SERVICE_UNAVAILABLE
+    504: GATEWAY_TIMEOUT
+
+event_types:
+  0x0201:
+    name: DB_POOL_STATUS
+    version: 1
+    fields:
+      - {name: pool_id,      offset: 0, type: u16, size: 2, endian: little}
+      - {name: active_conns, offset: 2, type: u16, size: 2, endian: little}
+      - {name: max_conns,    offset: 4, type: u16, size: 2, endian: little}
+      - {name: state_code,   offset: 6, type: u8,  size: 1, enum: pool_state, enum_field: state}
+
+  0x0202:
+    name: REQUEST_METRIC
+    version: 1
+    fields:
+      - {name: service_id,  offset: 0, type: u16, size: 2, endian: little}
+      - {name: latency_ms,  offset: 2, type: u32, size: 4, endian: little}
+      - {name: status_code, offset: 6, type: u16, size: 2, endian: little, enum: http_status, enum_field: status_name}
+
+  0x0203:
+    name: HTTP_ERROR
+    version: 1
+    fields:
+      - {name: service_id,    offset: 0, type: u16, size: 2, endian: little}
+      - {name: error_code,    offset: 2, type: u16, size: 2, endian: little}
+      - {name: downstream_id, offset: 4, type: u16, size: 2, endian: little}

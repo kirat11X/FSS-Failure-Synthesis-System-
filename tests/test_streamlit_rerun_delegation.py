@@ -64,13 +64,13 @@ class TestStreamlitRerunDelegation(unittest.TestCase):
         # 6. Verify presence of metrics (System / Synthesis summary)
         self.assertGreater(len(at.metric), 0, f"[{run_label}] Missing dashboard metrics")
 
-        # 7. Verify all tabs render across every run (supports 6 core tabs or 7 tabs with dedicated Vendor Manual)
+        # 7. Verify all tabs render across every run (7 clean concise tabs)
         tab_labels = [t.label for t in at.tabs]
         self.assertIn(len(tab_labels), (6, 7), f"[{run_label}] Expected 6 or 7 tabs, found {len(tab_labels)}")
         self.assertTrue(any("Timeline" in t for t in tab_labels), f"[{run_label}] Missing Timeline tab")
-        self.assertTrue(any("Data Gaps" in t for t in tab_labels), f"[{run_label}] Missing Data Gaps tab")
-        self.assertTrue(any("Domain Knowledge" in t for t in tab_labels), f"[{run_label}] Missing Domain Knowledge tab")
-        self.assertTrue(any("Citation" in t for t in tab_labels), f"[{run_label}] Missing Citation Validation tab")
+        self.assertTrue(any("Data Gaps" in t or "Gaps" in t for t in tab_labels), f"[{run_label}] Missing Data Gaps tab")
+        self.assertTrue(any("Domain Knowledge" in t or "Domain RAG" in t for t in tab_labels), f"[{run_label}] Missing Domain Knowledge/RAG tab")
+        self.assertTrue(any("Citation" in t or "Audit" in t for t in tab_labels), f"[{run_label}] Missing Citation/Audit tab")
 
     def test_streamlit_initial_load_plus_three_consecutive_reruns(self):
         """Simulate initial load plus 3 consecutive widget reruns against app.py."""

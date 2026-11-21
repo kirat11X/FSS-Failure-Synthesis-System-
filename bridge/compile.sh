@@ -24,7 +24,7 @@ java bridge/CompileHelper.java -d fss-core/target/classes \
     fss-core/src/main/java/fss/core/*.java
 
 # 2. Compile Storage subsystem sources
-java bridge/CompileHelper.java -d fss-core/target/classes \
+java bridge/CompileHelper.java -cp "fss-core/target/classes" -d fss-core/target/classes \
     fss-core/src/main/java/Storage/BlockAllocator.java \
     fss-core/src/main/java/Storage/BlockMetadata.java \
     fss-core/src/main/java/Storage/BlockMetadataStore.java \
@@ -35,7 +35,8 @@ java bridge/CompileHelper.java -d fss-core/target/classes \
     fss-core/src/main/java/Storage/StorageConfig.java \
     fss-core/src/main/java/Storage/StorageMain.java \
     fss-core/src/main/java/Storage/StorageWorker.java \
-    fss-core/src/main/java/Storage/TelemetryBuffer.java
+    fss-core/src/main/java/Storage/TelemetryBuffer.java \
+    fss-core/src/main/java/Storage/DynamicSegmentCompactor.java
 
 # 3. Compile Ingestion & Retrieval subsystem sources
 if [ -n "$JACKSON_CP" ]; then
@@ -49,6 +50,7 @@ if [ -n "$JACKSON_CP" ]; then
       fss-core/src/main/java/Retrieval/RetrievalService.java \
       fss-core/src/main/java/Retrieval/RetrievalIpcServer.java \
       fss-core/src/main/java/Retrieval/RetrievalMain.java \
+      fss-core/src/main/java/Retrieval/UdsBridgeServer.java \
       fss-core/src/main/DirectIngestionRetrievalTest.java
 fi
 

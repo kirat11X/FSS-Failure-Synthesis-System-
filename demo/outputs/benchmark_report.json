@@ -1,0 +1,213 @@
+{
+  "timestamp": 1795218192.8175976,
+  "scenarios": [
+    {
+      "scenario_id": "SC1",
+      "name": "D1 Drones Cross-Agent Causal Chain",
+      "domain": "d1_drone_fleet",
+      "events_count": 9,
+      "passed": true,
+      "verdict": "ACCEPTED_WITH_CORRECTIONS",
+      "badge": "VERIFIED_SUPPORTED",
+      "notes": [
+        "Restored missing data gap: OPAQUE_BYTES for ev-9d2fbc08bffc"
+      ]
+    },
+    {
+      "scenario_id": "SC2",
+      "name": "D2 Microservices Gateway Timeout Cascade",
+      "domain": "d2_microservices",
+      "events_count": 3,
+      "passed": true,
+      "verdict": "ACCEPTED",
+      "badge": "VERIFIED_SUPPORTED",
+      "notes": [
+        "DB pool state=POOL_EXHAUSTED",
+        "status_code=504 GATEWAY_TIMEOUT"
+      ]
+    },
+    {
+      "scenario_id": "SC3",
+      "name": "D3 Industrial PLC Thermal Interlock Trip",
+      "domain": "d3_industrial_plc",
+      "events_count": 3,
+      "passed": true,
+      "verdict": "ACCEPTED",
+      "badge": "VERIFIED_SUPPORTED",
+      "notes": [
+        "temperature=87.5C drift_detected=True",
+        "interlock reason=OVERHEAT"
+      ]
+    },
+    {
+      "scenario_id": "SC4",
+      "name": "D4 Autonomous Vehicle CAN Big-Endian Emergency Stop",
+      "domain": "d4_autonomous_vehicle",
+      "events_count": 3,
+      "passed": true,
+      "verdict": "ACCEPTED",
+      "badge": "VERIFIED_SUPPORTED",
+      "notes": [
+        "Big-Endian CAN bus decoding verified",
+        "slip_ratio=0.45 ABS=ENGAGED lamp_on=True"
+      ]
+    },
+    {
+      "scenario_id": "SC5",
+      "name": "D5 Cross-Producer Clock Skew & Drift",
+      "domain": "d5_warehouse_robots",
+      "events_count": 3,
+      "passed": true,
+      "verdict": "ACCEPTED",
+      "badge": "VERIFIED_SUPPORTED",
+      "notes": [
+        "Clock caveat enforced on multi-source non-monotonic stream"
+      ]
+    },
+    {
+      "scenario_id": "SC6",
+      "name": "Nominal Negative Control (Zero Anomalies)",
+      "domain": "d1_drone_fleet",
+      "events_count": 3,
+      "passed": true,
+      "verdict": "ACCEPTED",
+      "badge": "VERIFIED_SUPPORTED",
+      "notes": [
+        "Zero false-positive anomaly detections on healthy stream"
+      ]
+    },
+    {
+      "scenario_id": "SC7",
+      "name": "Unknown Event Types Negative Control",
+      "domain": "cross_domain",
+      "events_count": 1,
+      "passed": true,
+      "verdict": "QUARANTINED",
+      "badge": "UNKNOWN_EVENT_TYPE",
+      "notes": [
+        "0x31 tagged UNKNOWN_EVENT_TYPE",
+        "Payload bytes kept strictly opaque"
+      ]
+    },
+    {
+      "scenario_id": "SC8",
+      "name": "Truncated Retrieval & Malformed Frame Control",
+      "domain": "cross_domain",
+      "events_count": 2,
+      "passed": true,
+      "verdict": "GAP_FLAGGED",
+      "badge": "DATA_GAP_QUARANTINE",
+      "notes": [
+        "MALFORMED_PAYLOAD quarantined",
+        "Data gap logged in evidence"
+      ]
+    }
+  ],
+  "forcebench": {
+    "total_test_cases": 200,
+    "fake_citations_rejection_pct": 100.0,
+    "entity_binding_detection_pct": 100.0,
+    "monotonicity_violation_rate": 0.0,
+    "axes_metrics": [
+      {
+        "axis": "Relation",
+        "pairs_evaluated": 15,
+        "overclaims_detected": 15,
+        "hedged_passed": 15,
+        "axis_accuracy": 100.0
+      },
+      {
+        "axis": "Modality",
+        "pairs_evaluated": 15,
+        "overclaims_detected": 15,
+        "hedged_passed": 15,
+        "axis_accuracy": 100.0
+      },
+      {
+        "axis": "Scope",
+        "pairs_evaluated": 15,
+        "overclaims_detected": 15,
+        "hedged_passed": 15,
+        "axis_accuracy": 100.0
+      },
+      {
+        "axis": "Temporal",
+        "pairs_evaluated": 15,
+        "overclaims_detected": 15,
+        "hedged_passed": 15,
+        "axis_accuracy": 100.0
+      },
+      {
+        "axis": "Numeric",
+        "pairs_evaluated": 15,
+        "overclaims_detected": 15,
+        "hedged_passed": 15,
+        "axis_accuracy": 100.0
+      }
+    ]
+  },
+  "rag": {
+    "total_queries": 6,
+    "precision_at_3": 1.0,
+    "recall_at_3": 1.0,
+    "precision_at_5": 0.767,
+    "mean_reciprocal_rank": 1.0
+  },
+  "decoder": [
+    {
+      "schema_name": "drone_v0.yaml",
+      "domain": "d1_drone_fleet",
+      "endianness": "little",
+      "events_decoded": 10000,
+      "duration_ms": 306.05,
+      "throughput_events_per_sec": 32674.7
+    },
+    {
+      "schema_name": "microservices_v0.yaml",
+      "domain": "d2_microservices",
+      "endianness": "little",
+      "events_decoded": 10000,
+      "duration_ms": 64.62,
+      "throughput_events_per_sec": 154758.6
+    },
+    {
+      "schema_name": "industrial_plc_v0.yaml",
+      "domain": "d3_industrial_plc",
+      "endianness": "little",
+      "events_decoded": 10000,
+      "duration_ms": 74.87,
+      "throughput_events_per_sec": 133556.2
+    },
+    {
+      "schema_name": "autonomous_vehicle_v0.yaml",
+      "domain": "d4_autonomous_vehicle",
+      "endianness": "big",
+      "events_decoded": 10000,
+      "duration_ms": 70.14,
+      "throughput_events_per_sec": 142567.5
+    },
+    {
+      "schema_name": "warehouse_robots_v0.yaml",
+      "domain": "d5_warehouse_robots",
+      "endianness": "little",
+      "events_decoded": 10000,
+      "duration_ms": 97.72,
+      "throughput_events_per_sec": 102328.3
+    },
+    {
+      "schema_name": "financial_hft_v0.yaml",
+      "domain": "financial_hft",
+      "endianness": "little",
+      "events_decoded": 10000,
+      "duration_ms": 57.74,
+      "throughput_events_per_sec": 173198.1
+    }
+  ],
+  "ipc": {
+    "subprocess_p50_ms": 69.15,
+    "subprocess_p99_ms": 70.36,
+    "uds_p50_ms": 0.96,
+    "uds_p99_ms": 1.61,
+    "speedup_factor": 72.0
+  }
+}
