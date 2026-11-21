@@ -226,7 +226,8 @@ public final class JavaStoreBridge {
                 int payloadLen = buf.getInt(off + 20);
                 int recordLen = EnvelopeCodec.ENVELOPE_HEADER_LEN + payloadLen;
                 if (off + recordLen > data.length) {
-                    throw new IOException("Truncated envelope in stream at offset " + off);
+                    System.err.println("WARN: Truncated trailing envelope at offset " + off + " (quarantined " + (data.length - off) + " bytes); preserving valid prefix");
+                    break;
                 }
                 EventRecord record = EnvelopeCodec.decodeEnvelope(buf, off, recordLen);
                 store.append(record);
