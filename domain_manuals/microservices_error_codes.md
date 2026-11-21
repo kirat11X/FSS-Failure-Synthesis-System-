@@ -66,3 +66,29 @@ This technical specification documents error codes, telemetry event indicators, 
 - **Description**: The circuit breaker has entered the OPEN state after consecutive call failures exceeded the error threshold.
 - **Probable Causes**: Downstream microservice outage; persistent connection timeouts; network link failure.
 - **Recommended Actions**: Route requests to static fallbacks; verify downstream service recovery before transition to HALF-OPEN.
+
+---
+
+## 3. Microservice Source ID Topology (RCAEval RE2-OB)
+
+| Source ID | Service Name | Role & Responsibility |
+|---|---|---|
+| 101 | `frontend` | Web UI & API ingress gateway (calls checkout, cart, recommendations) |
+| 102 | `checkoutservice` | Order processing, payment dispatch & inventory reservation |
+| 103 | `paymentservice` | Credit card authorization & payment gateway client |
+| 104 | `emailservice` | Order confirmation email delivery |
+| 105 | `currencyservice` | Exchange rate conversion service |
+| 106 | `shippingservice` | Shipping cost calculation & carrier tracking |
+| 107 | `productcatalogservice` | Product search & inventory catalog provider |
+| 108 | `cartservice` | User shopping cart Redis session manager |
+| 109 | `recommendationservice` | AI/ML product recommendation provider |
+| 110 | `adservice` | Contextual advertising provider |
+| 111 | `redis` | In-memory cache & state store |
+
+### [CHECKOUTSERVICE_FAULT] Source 102 Checkoutservice Degradation
+- **Subsystem**: SERVICE_MESH
+- **Severity**: CRITICAL
+- **Description**: Source 102 (checkoutservice) is the core order processing engine. CPU spikes, connection saturation, or network delay on Source 102 causes cascading 504 GATEWAY_TIMEOUT and 500 INTERNAL_SERVER_ERROR upstream to frontend (Source 101).
+- **Probable Causes**: High CPU utilization on checkoutservice; slow downstream payment processing; socket contention; database pool saturation.
+- **Recommended Actions**: Scale checkoutservice replicas; profile CPU profiling / heap dumps; verify downstream payment and shipping service response times.
+

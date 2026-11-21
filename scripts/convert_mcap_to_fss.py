@@ -55,6 +55,35 @@ EVENT_ERROR = 0x45
 
 MCAP_MAGIC = b"\x89MCAP\x30\r\n"
 
+BASE_EPOCH_NS = 1_718_000_000_000_000_000
+
+
+def normalize_timestamp_ns(raw_val: Any, base_epoch_ns: int = BASE_EPOCH_NS) -> int:
+    """Normalize timestamp from seconds, milliseconds, microseconds, or nanoseconds into uint64 ns."""
+    if isinstance(raw_val, str):
+        raw_val = raw_val.strip()
+        if not raw_val:
+            return base_epoch_ns
+        try:
+            val = float(raw_val)
+        except ValueError:
+            return base_epoch_ns
+    else:
+        val = float(raw_val)
+
+    if val >= 1e18:
+        return int(val)
+    elif val >= 1e15:
+        return int(val * 1_000)
+    elif val >= 1e12:
+        return int(val * 1_000_000)
+    elif val >= 1e9:
+        return int(val * 1_000_000_000)
+    elif val >= 0:
+        return base_epoch_ns + int(val * 1_000_000_000 if val < 1000 else val)
+    return base_epoch_ns
+
+
 # MCAP Record Opcodes
 OP_HEADER = 0x01
 OP_FOOTER = 0x02
@@ -156,11 +185,10 @@ class PurePythonMcapReader:
 
             elif opcode == OP_CHUNK:
                 if len(body) >= 28:
-                    off = 24  # skip start_time, end_time, uncompressed_size
-                    uncomp_crc = struct.unpack_from("<I", body, off)[0]
-                    off += 4
+                    off = 28
                     compression, off = _read_prefixed_str(body, off)
-                    records_data, _ = _read_prefixed_bytes(body, off)
+                    records_len = struct.unpack_from("<Q", body, off)[0]
+                    records_data = body[off + 8 : off + 8 + records_len]
                     if compression == "" or compression.lower() == "none":
                         chunk_io = io.BytesIO(records_data)
                         yield from self._parse_records(chunk_io)
@@ -329,7 +357,8 @@ def parse_mcap_payload_to_fss(
             payload = struct.pack(">HH", 1, 1)
         return (timestamp_ns, EVENT_ERROR, payload)
 
-    return None
+    # 9. Generic robotics message fallback -> DIAGNOSTIC (0x30)
+    return (timestamp_ns, EVENT_DIAGNOSTIC, struct.pack("<Hf", 0, 25.0))
 
 
 def convert_mcap_to_fss(
@@ -361,7 +390,8 @@ def convert_mcap_to_fss(
                 for schema, channel, message in reader.iter_messages():
                     if max_records and records_written >= max_records:
                         break
-                    ts_ns = message.log_time if message.log_time > 0 else message.publish_time
+                    ts_raw = message.log_time if message.log_time > 0 else message.publish_time
+                    ts_ns = normalize_timestamp_ns(ts_raw)
                     res = parse_mcap_payload_to_fss(
                         channel.topic, channel.message_encoding, message.data, ts_ns
                     )
@@ -382,7 +412,8 @@ def convert_mcap_to_fss(
             for channel, msg in reader.read_messages():
                 if max_records and records_written >= max_records:
                     break
-                ts_ns = msg.log_time if msg.log_time > 0 else msg.publish_time
+                ts_raw = msg.log_time if msg.log_time > 0 else msg.publish_time
+                ts_ns = normalize_timestamp_ns(ts_raw)
                 res = parse_mcap_payload_to_fss(
                     channel.topic, channel.message_encoding, msg.data, ts_ns
                 )

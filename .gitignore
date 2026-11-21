@@ -31,6 +31,7 @@ fss-core/lib/
 *.lock
 fss-core/test-data/
 test_data/uploads/
+test_data/real_world/
 
 # Downloaded research PDFs (keep research_papers/README.md only)
 research_papers/*/

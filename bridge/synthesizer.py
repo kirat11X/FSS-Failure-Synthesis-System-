@@ -791,7 +791,8 @@ def query_ollama(
         data=json.dumps(body).encode("utf-8"),
         headers={"Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    ollama_timeout = int(os.environ.get("OLLAMA_TIMEOUT", "90"))
+    with urllib.request.urlopen(req, timeout=ollama_timeout) as resp:
         data = json.loads(resp.read().decode("utf-8"))
         content = data.get("message", {}).get("content", "")
         parsed, _ = process_qwen3_thinking_output(content, thinking_budget=thinking_budget)
@@ -829,7 +830,8 @@ def query_llama_server(
         data=json.dumps(body).encode("utf-8"),
         headers={"Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    ollama_timeout = int(os.environ.get("OLLAMA_TIMEOUT", "90"))
+    with urllib.request.urlopen(req, timeout=ollama_timeout) as resp:
         data = json.loads(resp.read().decode("utf-8"))
         content = data.get("content", "")
         parsed, _ = process_qwen3_thinking_output(content, thinking_budget=thinking_budget)
@@ -1276,7 +1278,7 @@ def synthesize_and_validate(
     # 5. Try HuggingFace local weights if Ollama was not active
     effective_hf_path = (
         ""
-        if skip_external_llm
+        if (skip_external_llm or os.environ.get("SKIP_LOCAL_HF") == "1")
         else (LOCAL_HF_PATH or os.environ.get("LOCAL_MODEL_PATH", ""))
     )
     if synthesis is None and effective_hf_path and os.path.exists(effective_hf_path):
