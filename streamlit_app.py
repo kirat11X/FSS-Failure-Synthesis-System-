@@ -792,8 +792,6 @@ def main() -> None:
 
     # Discover fixtures, IRL logs, unseen scenarios, and existing stores
     fixture_files = sorted(p.name for p in GOLDEN_DIR.glob("*.bin")) if GOLDEN_DIR.is_dir() else []
-    irl_files = sorted(p.name for p in IRL_DIR.glob("*.bin")) if IRL_DIR.is_dir() else []
-    unseen_files = sorted(p.name for p in UNSEEN_DIR.glob("*.bin")) if UNSEEN_DIR.is_dir() else []
     dat_files = sorted(p.name for p in BRIDGE_DIR.glob("*.dat")) if BRIDGE_DIR.is_dir() else []
 
     # =========================================================================
@@ -806,13 +804,12 @@ def main() -> None:
             "Source Mode",
             [
                 "Upload Custom Binary (.bin / .fss.bin)",
-                "Real-World ArduPilot Logs (test_data/irl)",
-                "Unseen Test Scenarios (test_data/unseen)",
                 "Golden Fixtures (fixtures/golden)",
                 "Existing Java BlockStore (.dat)",
                 "Java Telemetry Storage (IPC Engine)",
             ],
             index=0,
+            help="Select telemetry input source: upload custom .bin/.fss.bin files directly, inspect reference golden fixtures, open persisted Java BlockStore files (.dat), or query live Java IPC storage.",
         )
 
         chosen_fixtures: list[Path] = []
@@ -846,30 +843,6 @@ def main() -> None:
                 st.caption(f"📁 Live Preview Fixture: `{default_fixture.name}`")
             else:
                 st.info("Upload a `.bin` or `.fss.bin` file to begin.")
-
-        elif source_mode == "Real-World ArduPilot Logs (test_data/irl)":
-            if irl_files:
-                sel_name = st.selectbox("Select ArduPilot Flight Log", irl_files, index=0)
-                active_filename = sel_name
-                src_path = IRL_DIR / sel_name
-                raw_bytes_sample = src_path.read_bytes()[:4096]
-                file_sha256 = compute_sha256(src_path)
-                dest_path, was_cached = cache_mgr.get_or_ingest(src_path, filename=sel_name)
-                chosen_fixtures = [dest_path]
-            else:
-                st.warning("No logs found in test_data/irl/")
-
-        elif source_mode == "Unseen Test Scenarios (test_data/unseen)":
-            if unseen_files:
-                sel_name = st.selectbox("Select Unseen Scenario Log", unseen_files, index=0)
-                active_filename = sel_name
-                src_path = UNSEEN_DIR / sel_name
-                raw_bytes_sample = src_path.read_bytes()[:4096]
-                file_sha256 = compute_sha256(src_path)
-                dest_path, was_cached = cache_mgr.get_or_ingest(src_path, filename=sel_name)
-                chosen_fixtures = [dest_path]
-            else:
-                st.warning("No logs found in test_data/unseen/")
 
         elif source_mode == "Golden Fixtures (fixtures/golden)":
             if fixture_files:

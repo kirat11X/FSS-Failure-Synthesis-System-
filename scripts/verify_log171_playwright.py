@@ -66,6 +66,8 @@ def main():
         # Step 3: Wait for sidebar status badge to update to ARDUPILOT
         print("  [Step 3] Waiting for sidebar status badge (ARDUPILOT · 5000 EVENTS)...")
         page.wait_for_selector(".crt-status-indicator >> text=ARDUPILOT", timeout=20000)
+        time.sleep(1.0)
+        page.wait_for_load_state("networkidle")
         sidebar_badge = page.locator(".crt-status-indicator").first.inner_text().strip()
         print(f"  --> Sidebar Badge 1: {sidebar_badge}")
         assert "ARDUPILOT" in sidebar_badge, f"Expected 'ARDUPILOT' in badge, got '{sidebar_badge}'!"
