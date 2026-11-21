@@ -118,9 +118,14 @@ if [ -f "fss_env.sh" ]; then
 fi
 
 # Activate virtual environment if present
-if [ -d ".venv" ] && [ -f ".venv/bin/activate" ] && [ -z "${VIRTUAL_ENV:-}" ]; then
-  # shellcheck source=/dev/null
-  source .venv/bin/activate
+if [ -d ".venv" ] && [ -z "${VIRTUAL_ENV:-}" ]; then
+  if [ -f ".venv/bin/activate" ]; then
+    # shellcheck source=/dev/null
+    source .venv/bin/activate
+  elif [ -f ".venv/Scripts/activate" ]; then
+    # shellcheck source=/dev/null
+    source .venv/Scripts/activate
+  fi
 fi
 
 # Verify Java: probe $JAVA_HOME/bin/java first, fallback to PATH
@@ -143,33 +148,58 @@ if [ "$JAVA_MAJOR" -lt 21 ]; then
 fi
 ok "Java runtime: OpenJDK $JAVA_VERSION_STR ($JAVA_BIN)"
 
-# Verify Python
-VENV_PYTHON=""
-if [ -x "$ROOT_DIR/.venv/bin/python" ]; then
-  VENV_PYTHON="$ROOT_DIR/.venv/bin/python"
-elif [ -n "${VIRTUAL_ENV:-}" ] && [ -x "$VIRTUAL_ENV/bin/python" ]; then
-  VENV_PYTHON="$VIRTUAL_ENV/bin/python"
-elif command -v python3 >/dev/null 2>&1; then
-  VENV_PYTHON="$(command -v python3)"
-elif command -v python >/dev/null 2>&1; then
-  VENV_PYTHON="$(command -v python)"
-else
-  die "Python interpreter not found on PATH. Python 3.11+ is required."
+# Verify Python. Some Windows installations expose a Microsoft Store alias as
+# `python`/`python3`; validate each candidate before selecting it.
+PYTHON_CMD=()
+PYTHON_LABEL=""
+try_python() {
+  local -a candidate=("$@")
+  if "${candidate[@]}" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1; then
+    PYTHON_CMD=("${candidate[@]}")
+    PYTHON_LABEL="${candidate[*]}"
+    return 0
+  fi
+  return 1
+}
+
+if [ -x "$ROOT_DIR/.venv/Scripts/python.exe" ]; then
+  try_python "$ROOT_DIR/.venv/Scripts/python.exe" || true
+fi
+if [ "${#PYTHON_CMD[@]}" -eq 0 ] && [ -x "$ROOT_DIR/.venv/bin/python" ]; then
+  try_python "$ROOT_DIR/.venv/bin/python" || true
+fi
+if [ "${#PYTHON_CMD[@]}" -eq 0 ] && [ -n "${VIRTUAL_ENV:-}" ]; then
+  if [ -x "$VIRTUAL_ENV/Scripts/python.exe" ]; then
+    try_python "$VIRTUAL_ENV/Scripts/python.exe" || true
+  elif [ -x "$VIRTUAL_ENV/bin/python" ]; then
+    try_python "$VIRTUAL_ENV/bin/python" || true
+  fi
+fi
+if [ "${#PYTHON_CMD[@]}" -eq 0 ] && command -v python3 >/dev/null 2>&1; then
+  try_python "$(command -v python3)" || true
+fi
+if [ "${#PYTHON_CMD[@]}" -eq 0 ] && command -v python >/dev/null 2>&1; then
+  try_python "$(command -v python)" || true
+fi
+if [ "${#PYTHON_CMD[@]}" -eq 0 ] && command -v py >/dev/null 2>&1; then
+  try_python py -3 || true
+fi
+if [ "${#PYTHON_CMD[@]}" -eq 0 ]; then
+  die "Python 3.11+ interpreter not found. Install Python 3.11+ or ensure 'py -3' resolves to it."
 fi
 
-"$VENV_PYTHON" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' \
-  || die "Detected $("$VENV_PYTHON" -V 2>&1). FSS requires Python 3.11+."
-ok "Python interpreter: $("$VENV_PYTHON" -V 2>&1) ($VENV_PYTHON)"
+PYTHON_VERSION="$("${PYTHON_CMD[@]}" -V 2>&1)"
+ok "Python interpreter: $PYTHON_VERSION ($PYTHON_LABEL)"
 
 # ------------------------------------------------------------------------------
 # 2. Editable Package & Import Check
 # ------------------------------------------------------------------------------
 echo "[2/5] Verifying Editable Package Installation (pip install -e .)..."
-if ! "$VENV_PYTHON" -c "import bridge; import fss_py" >/dev/null 2>&1; then
+if ! "${PYTHON_CMD[@]}" -c "import bridge; import fss_py" >/dev/null 2>&1; then
   echo "  Package 'bridge' or 'fss_py' not found on Python path; installing in editable mode..."
-  "$VENV_PYTHON" -m pip install -e . || die "Failed to install package in editable mode via pip install -e ."
+  "${PYTHON_CMD[@]}" -m pip install -e . || die "Failed to install package in editable mode via pip install -e ."
 fi
-"$VENV_PYTHON" -c "import bridge; import fss_py" || die "Failed to import bridge/fss_py after editable install check."
+"${PYTHON_CMD[@]}" -c "import bridge; import fss_py" || die "Failed to import bridge/fss_py after editable install check."
 ok "Editable package verified (import bridge, fss_py OK)"
 
 # ------------------------------------------------------------------------------
@@ -276,7 +306,7 @@ echo
     fi
   done ) &
 
-PYTHONUNBUFFERED=1 XLA_PYTHON_CLIENT_PREALLOCATE=false exec "$VENV_PYTHON" -m streamlit run app.py \
+PYTHONUNBUFFERED=1 XLA_PYTHON_CLIENT_PREALLOCATE=false exec "${PYTHON_CMD[@]}" -m streamlit run app.py \
   --global.developmentMode false \
   --server.address "$SERVER_ADDRESS" \
   --server.port "$PORT" \

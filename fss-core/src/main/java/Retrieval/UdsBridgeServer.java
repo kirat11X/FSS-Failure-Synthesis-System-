@@ -1,16 +1,5 @@
 package Retrieval;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
-import fss.core.BlockInfo;
-import fss.core.BlockStore;
-import fss.core.EnvelopeCodec;
-import fss.core.EventRecord;
-import fss.core.RetrieveRequest;
-import fss.core.RetrieveResult;
-
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.ByteArrayOutputStream;
@@ -26,7 +15,6 @@ import java.nio.channels.Channels;
 import java.nio.channels.FileChannel;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
@@ -42,17 +30,31 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import fss.core.BlockInfo;
+import fss.core.BlockStore;
+import fss.core.EnvelopeCodec;
+import fss.core.EventRecord;
+import fss.core.RetrieveRequest;
+import fss.core.RetrieveResult;
+
 /**
  * Persistent JEP-380 AF_UNIX Domain Socket Bridge Server (REQ-072).
  *
  * Implements:
- *  - Persistent AF_UNIX daemon on default /tmp/fss_bridge.sock (or CLI/env var).
- *  - Clean socket file unlinking before bind and on JVM shutdown.
- *  - Diagnostic logs strictly to System.err with ISO-8601 timestamps and trace_id.
- *  - 4-byte Big-Endian length prefixed frame protocol (up to 16 MB) + graceful NDJSON acceptance.
- *  - Commands: ping, retrieve, retrieve_full, shutdown.
- *  - Lossless uint64 serialization via Long.toUnsignedString.
- *  - Safe store access with ReentrantReadWriteLock per store path.
+ * - Persistent AF_UNIX daemon on default /tmp/fss_bridge.sock (or CLI/env var).
+ * - Clean socket file unlinking before bind and on JVM shutdown.
+ * - Diagnostic logs strictly to System.err with ISO-8601 timestamps and
+ * trace_id.
+ * - 4-byte Big-Endian length prefixed frame protocol (up to 16 MB) + graceful
+ * NDJSON acceptance.
+ * - Commands: ping, retrieve, retrieve_full, shutdown.
+ * - Lossless uint64 serialization via Long.toUnsignedString.
+ * - Safe store access with ReentrantReadWriteLock per store path.
  */
 public final class UdsBridgeServer {
 
@@ -132,10 +134,12 @@ public final class UdsBridgeServer {
                 if (serverChannel != null && serverChannel.isOpen()) {
                     serverChannel.close();
                 }
-            } catch (Exception ignored) {}
+            } catch (Exception ignored) {
+            }
             try {
                 Files.deleteIfExists(socketPath);
-            } catch (Exception ignored) {}
+            } catch (Exception ignored) {
+            }
             log(initTraceId, "INFO", "UdsBridgeServer shutdown hook completed; socket unlinked.");
         }));
 
@@ -144,7 +148,8 @@ public final class UdsBridgeServer {
         while (RUNNING.get()) {
             try {
                 SocketChannel client = serverChannel.accept();
-                if (client == null) continue;
+                if (client == null)
+                    continue;
                 clientExecutor.submit(() -> handleClient(client));
             } catch (Exception e) {
                 if (RUNNING.get()) {
@@ -162,20 +167,22 @@ public final class UdsBridgeServer {
             if (serverChannel != null && serverChannel.isOpen()) {
                 serverChannel.close();
             }
-        } catch (Exception ignored) {}
+        } catch (Exception ignored) {
+        }
         try {
             Files.deleteIfExists(socketPath);
-        } catch (Exception ignored) {}
+        } catch (Exception ignored) {
+        }
         clientExecutor.shutdownNow();
     }
 
     private void handleClient(SocketChannel client) {
         String clientTraceId = UUID.randomUUID().toString().replace("-", "");
         try (client;
-             InputStream rawIn = Channels.newInputStream(client);
-             OutputStream rawOut = Channels.newOutputStream(client);
-             BufferedInputStream in = new BufferedInputStream(rawIn);
-             BufferedOutputStream out = new BufferedOutputStream(rawOut)) {
+                InputStream rawIn = Channels.newInputStream(client);
+                OutputStream rawOut = Channels.newOutputStream(client);
+                BufferedInputStream in = new BufferedInputStream(rawIn);
+                BufferedOutputStream out = new BufferedOutputStream(rawOut)) {
 
             while (RUNNING.get() && client.isOpen()) {
                 in.mark(8);
@@ -193,11 +200,13 @@ public final class UdsBridgeServer {
                     ByteArrayOutputStream lineBuf = new ByteArrayOutputStream();
                     int b;
                     while ((b = in.read()) != -1) {
-                        if (b == '\n') break;
+                        if (b == '\n')
+                            break;
                         lineBuf.write(b);
                     }
                     requestBytes = lineBuf.toByteArray();
-                    if (requestBytes.length == 0) continue;
+                    if (requestBytes.length == 0)
+                        continue;
                 } else {
                     int frameLen = ByteBuffer.wrap(header).order(ByteOrder.BIG_ENDIAN).getInt();
                     if (frameLen <= 0 || frameLen > MAX_FRAME_SIZE) {
@@ -267,7 +276,8 @@ public final class UdsBridgeServer {
                     new Thread(() -> {
                         try {
                             Thread.sleep(50);
-                        } catch (InterruptedException ignored) {}
+                        } catch (InterruptedException ignored) {
+                        }
                         close();
                         System.exit(0);
                     }).start();
@@ -301,7 +311,8 @@ public final class UdsBridgeServer {
         return "ping";
     }
 
-    private static void sendErrorResponse(OutputStream out, boolean isNdjson, String message, String traceId) throws IOException {
+    private static void sendErrorResponse(OutputStream out, boolean isNdjson, String message, String traceId)
+            throws IOException {
         ObjectNode err = MAPPER.createObjectNode();
         err.put("status", "ERROR");
         err.put("error", message);
@@ -424,8 +435,10 @@ public final class UdsBridgeServer {
                 long maxTs = Long.MIN_VALUE;
                 for (BlockInfo b : blocks) {
                     if (!b.empty()) {
-                        if (Long.compareUnsigned(b.minTsNs(), minTs) < 0) minTs = b.minTsNs();
-                        if (Long.compareUnsigned(b.maxTsNs(), maxTs) > 0) maxTs = b.maxTsNs();
+                        if (Long.compareUnsigned(b.minTsNs(), minTs) < 0)
+                            minTs = b.minTsNs();
+                        if (Long.compareUnsigned(b.maxTsNs(), maxTs) > 0)
+                            maxTs = b.maxTsNs();
                     }
                 }
 
@@ -507,16 +520,20 @@ public final class UdsBridgeServer {
                         buf.clear();
                         fc.position((long) i * EnvelopeCodec.BLOCK_SIZE);
                         while (buf.hasRemaining()) {
-                            if (fc.read(buf) < 0) break;
+                            if (fc.read(buf) < 0)
+                                break;
                         }
                         buf.flip();
 
                         int off = 0;
                         while (EnvelopeCodec.BLOCK_SIZE - off >= EnvelopeCodec.MIN_RECORD_SIZE) {
                             int recordLen = buf.getInt(off);
-                            if (recordLen == 0) break;
-                            EnvelopeCodec.Error err = EnvelopeCodec.checkRecord(buf, off, EnvelopeCodec.BLOCK_SIZE - off);
-                            if (err != null) break;
+                            if (recordLen == 0)
+                                break;
+                            EnvelopeCodec.Error err = EnvelopeCodec.checkRecord(buf, off,
+                                    EnvelopeCodec.BLOCK_SIZE - off);
+                            if (err != null)
+                                break;
                             int envelope = off + EnvelopeCodec.RECORD_HEADER_LEN;
                             events.add(EnvelopeCodec.decodeEnvelope(buf, envelope, recordLen));
                             off += EnvelopeCodec.RECORD_HEADER_LEN + recordLen;

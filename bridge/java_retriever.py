@@ -14,7 +14,6 @@ Engineered against:
 from __future__ import annotations
 
 import base64
-import fcntl
 import json
 import os
 import shutil
@@ -25,7 +24,40 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Literal, Sequence
+from typing import Any, BinaryIO, Literal, Sequence
+
+if os.name == "nt":
+    import errno
+    import msvcrt
+
+    _LOCK_RETRY_ERRNOS = {errno.EACCES, getattr(errno, "EDEADLK", errno.EACCES)}
+
+    def _lock_sidecar_file(lock_file: BinaryIO) -> None:
+        lock_file.seek(0, os.SEEK_END)
+        if lock_file.tell() == 0:
+            lock_file.write(b"\0")
+            lock_file.flush()
+        lock_file.seek(0)
+        while True:
+            try:
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+                return
+            except OSError as exc:
+                if exc.errno not in _LOCK_RETRY_ERRNOS:
+                    raise
+                time.sleep(0.05)
+
+    def _unlock_sidecar_file(lock_file: BinaryIO) -> None:
+        lock_file.seek(0)
+        msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+else:
+    import fcntl
+
+    def _lock_sidecar_file(lock_file: BinaryIO) -> None:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+
+    def _unlock_sidecar_file(lock_file: BinaryIO) -> None:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 from fss_py.model import (
     ALL,
@@ -406,7 +438,7 @@ class JavaRetriever:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
 
         with open(lock_path, "a+b") as lock_file:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            _lock_sidecar_file(lock_file)
             try:
                 cmd = [
                     self.java_bin,
@@ -436,7 +468,7 @@ class JavaRetriever:
                     err_msg = stderr.decode("utf-8", errors="replace")
                     raise RuntimeError(f"JavaStoreBridge ingest failed (code {code}):\n{err_msg}")
             finally:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                _unlock_sidecar_file(lock_file)
 
     def ingest_clean(self, *fixture_paths: str | Path, trace_id: str | None = None) -> None:
         """Clean storage directory and ingest wire envelope fixtures."""
@@ -729,7 +761,7 @@ class JavaRetriever:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
 
         with open(lock_path, "a+b") as lock_file:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            _lock_sidecar_file(lock_file)
             try:
                 code, stdout, stderr = run_subprocess_safe(
                     cmd,
@@ -738,7 +770,7 @@ class JavaRetriever:
                     timeout=self.timeout,
                 )
             finally:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                _unlock_sidecar_file(lock_file)
 
         if code != 0:
             err_msg = stderr.decode("utf-8", errors="replace")

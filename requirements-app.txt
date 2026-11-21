@@ -1,3 +1,12 @@
+# External runtime setup (not installed by pip):
+# - Install and run Ollama separately, then pull a model, e.g. `ollama pull qwen3:4b`.
+#   FSS prefers qwen3:4b, qwen2.5:3b, qwen2.5:1.5b, then qwen2.5:7b.
+# - Optional: install/run llama-server separately; FSS connects at LLAMA_SERVER_URL
+#   (default http://127.0.0.1:8080).
+# - Optional Hugging Face fallback: install torch and transformers separately,
+#   download model weights, and set LOCAL_MODEL_PATH to their local directory.
+
+# Python application dependencies:
 streamlit>=1.40
 anthropic>=0.70  # optional: only for "Explain with Claude"
 -r requirements.txt

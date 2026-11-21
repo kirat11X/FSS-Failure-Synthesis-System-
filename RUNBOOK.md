@@ -23,6 +23,8 @@ To launch the full interactive web application (connecting the Streamlit UI to t
 ```
 *Access the live dashboard in your browser:* `http://127.0.0.1:8501` (or specify `./start.sh --port 8502`).
 
+When running from Windows Git Bash, the launcher also checks the Windows `py -3` launcher if `python` or `python3` is a Microsoft Store alias. It requires Python 3.11 or newer; a Windows virtual environment in `.venv\Scripts` is also recognized.
+
 ### Docker Deployment
 
 To build and run the multi-runtime container (OpenJDK 21 + Python 3.11 + Streamlit dashboard):
@@ -57,6 +59,8 @@ pip install -e .
 # 3. Verify editable installation
 python -c "import bridge; import fss_py; print('FSS editable package registered OK')"
 ```
+
+On Windows, create/activate the environment with `py -3 -m venv .venv` and `source .venv/Scripts/activate` from Git Bash.
 
 Streamlit is launched canonically via `exec "$VENV_PYTHON" -m streamlit run app.py` with `PYTHONUNBUFFERED=1` and `XLA_PYTHON_CLIENT_PREALLOCATE=false`. This ensures the active virtual-environment interpreter is executed directly without JAX VRAM preallocation.
 

@@ -6,6 +6,13 @@ cd "$ROOT_DIR"
 
 mkdir -p bridge/classes fss-core/target/classes fss-core/lib
 
+# Java uses ';' as the classpath separator on Windows, even when invoked from
+# Git Bash, and ':' on Unix-like systems.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) CLASSPATH_SEPARATOR=";" ;;
+  *) CLASSPATH_SEPARATOR=":" ;;
+esac
+
 # Ensure Jackson dependencies exist for Retrieval IPC
 if [ ! -f "fss-core/lib/jackson-databind-2.17.0.jar" ]; then
   curl -sSL "https://repo1.maven.org/maven2/com/fasterxml/jackson/core/jackson-core/2.17.0/jackson-core-2.17.0.jar" -o fss-core/lib/jackson-core-2.17.0.jar 2>/dev/null || true
@@ -16,7 +23,7 @@ fi
 # Build classpath for Jackson
 JACKSON_CP=""
 if [ -f "fss-core/lib/jackson-databind-2.17.0.jar" ]; then
-  JACKSON_CP="fss-core/lib/jackson-databind-2.17.0.jar:fss-core/lib/jackson-core-2.17.0.jar:fss-core/lib/jackson-annotations-2.17.0.jar"
+  JACKSON_CP="fss-core/lib/jackson-databind-2.17.0.jar${CLASSPATH_SEPARATOR}fss-core/lib/jackson-core-2.17.0.jar${CLASSPATH_SEPARATOR}fss-core/lib/jackson-annotations-2.17.0.jar"
 fi
 
 # 1. Compile fss.core storage engine sources
@@ -40,7 +47,7 @@ java bridge/CompileHelper.java -cp "fss-core/target/classes" -d fss-core/target/
 
 # 3. Compile Ingestion & Retrieval subsystem sources
 if [ -n "$JACKSON_CP" ]; then
-  java bridge/CompileHelper.java -cp "fss-core/target/classes:$JACKSON_CP" -d fss-core/target/classes \
+  java bridge/CompileHelper.java -cp "fss-core/target/classes${CLASSPATH_SEPARATOR}${JACKSON_CP}" -d fss-core/target/classes \
       fss-core/src/main/java/Ingestion/IngestionResult.java \
       fss-core/src/main/java/Ingestion/TelemetryIngestor.java \
       fss-core/src/main/java/Ingestion/FileIngestor.java \
@@ -55,7 +62,7 @@ if [ -n "$JACKSON_CP" ]; then
 fi
 
 # 4. Compile all bridge Java sources into bridge/classes
-java bridge/CompileHelper.java -cp "fss-core/target/classes:bridge/classes" -d bridge/classes \
+java bridge/CompileHelper.java -cp "fss-core/target/classes${CLASSPATH_SEPARATOR}bridge/classes" -d bridge/classes \
     bridge/StoreLockManager.java \
     bridge/JavaBridgeWorker.java \
     bridge/JavaStoreBridge.java
