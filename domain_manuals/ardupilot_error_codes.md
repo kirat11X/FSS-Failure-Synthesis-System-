@@ -17,11 +17,14 @@ This technical manual documents ArduPilot DataFlash error codes (`ERR` messages)
 | 5 | FailSafe | 4 | `SUBSYS_5_ECODE_4` | WARNING | Fence FailSafe Triggered | Geofence ceiling or radius breach | Command Return-To-Launch (RTL) or maneuver drone back inside containment fence |
 | 6 | Batt | 1 | `SUBSYS_6_ECODE_1` | CRITICAL | Battery Brownout Detected | Sudden high current draw collapsing bus voltage, faulty power module | Inspect PDB and BEC regulators, verify battery C-rating matches motor draw |
 | 7 | GPS | 2 | `SUBSYS_7_ECODE_2` | ERROR | GPS Not Healthy | GPS receiver lost lock, HDOP > 2.0, satellite count < 6, hardware comms lost | Check GPS antenna clearance, inspect UART wiring, wait for good satellite constellation |
+| 8 | GCS | 0 | `SUBSYS_8_ECODE_0` | INFO | GCS Failsafe Cleared / Link Restored | GCS telemetry connection restored | Resume mission |
+| 8 | GCS | 1 | `SUBSYS_8_ECODE_1` | WARNING | GCS Heartbeat Lost | Ground control station heartbeat not received | Check RF telemetry link |
 | 8 | GCS | 2 | `SUBSYS_8_ECODE_2` | WARNING | GCS Late Frame | High telemetry latency, packet loss over RF serial link | Lower telemetry baud rate, increase radio transmit power, reduce GCS stream rates |
 | 9 | Fence | 1 | `SUBSYS_9_ECODE_1` | WARNING | Fence Altitude Limit Exceeded | Vehicle climbed above configured FENCE_ALT_MAX | Verify barometer/GPS altitude, command descent or RTL |
 | 9 | Fence | 2 | `SUBSYS_9_ECODE_2` | WARNING | Fence Circle Limit Exceeded | Vehicle drifted beyond FENCE_RADIUS from home location | Verify position hold, check wind speed, return vehicle inside perimeter |
 | 9 | Fence | 3 | `SUBSYS_9_ECODE_3` | WARNING | Fence Alt and Circle Limit Exceeded | Vehicle violated both ceiling and radius boundaries | Immediate RTL or Land required |
 | 9 | Fence | 4 | `SUBSYS_9_ECODE_4` | WARNING | Fence Polygon Breach | Vehicle crossed complex polygon geofence boundary | Verify position estimate and command return trajectory |
+| 10 | FlightMode | 0 | `SUBSYS_10_ECODE_0` | INFO | Flight Mode Nominal / Armed | Motors armed or flight mode transition nominal | Normal operations |
 | 10 | FlightMode | 1 | `SUBSYS_10_ECODE_1` | ERROR | Flight Mode Transition Failed | Navigation unready, sensor health inadequate for requested flight mode | Check sensor readiness before arming/switching modes (e.g. GPS lock for Loiter/Auto) |
 | 11 | Motor | 1 | `SUBSYS_11_ECODE_1` | CRITICAL | Motor Lost / Desync | Motor ESC desync, broken propeller, phase cable disconnected | Check ESC telemetry, inspect motor windings, replace failing motor/ESC |
 | 11 | Motor | 2 | `SUBSYS_11_ECODE_2` | CRITICAL | Crash Check Triggered | Extreme tilt angle with high throttle, impact detected | Disarm immediately, inspect airframe and propulsion system |
@@ -30,8 +33,14 @@ This technical manual documents ArduPilot DataFlash error codes (`ERR` messages)
 | 13 | Parachute | 2 | `SUBSYS_13_ECODE_2` | CRITICAL | Parachute Not Deployed | Deployment servo jam, battery dead, failsafe misconfiguration | Inspect mechanical parachute release mechanism and servo linkage |
 | 14 | EKF | 1 | `SUBSYS_14_ECODE_1` | ERROR | EKF Variance Warning | Velocity or position innovation variance exceeds safety threshold | High vibration, magnetometer disturbance, or GPS multipath |
 | 14 | EKF | 2 | `SUBSYS_14_ECODE_2` | CRITICAL | EKF Bad Variance / Divergence | Compass and GPS disagreement, persistent filter divergence | Land vehicle, recalibrate IMU and compass, inspect vibration dampening |
+| 15 | Autotune | 0 | `SUBSYS_15_ECODE_0` | INFO | Auto Armed / Autotune Nominal | Vehicle auto-armed by mission or autotune nominal | Normal operations |
 | 15 | Autotune | 1 | `SUBSYS_15_ECODE_1` | WARNING | Autotune Bad Gains | Oscillation or divergence observed during automated PID tuning | Abort autotune, revert to conservative default gains |
-| 16 | Terrain | 1 | `SUBSYS_16_ECODE_1` | ERROR | Terrain Data Missing | Terrain database tile not loaded on SD card or missing from GCS | Load required SRTM terrain elevation tiles to autopilot SD card |
+| 16 | EKF_Check | 0 | `SUBSYS_16_ECODE_0` | INFO | EKF Failsafe Cleared / Error Resolved | EKF innovation variances returned below safety thresholds; filter stabilized | Normal flight resumed |
+| 16 | EKF_Check | 1 | `SUBSYS_16_ECODE_1` | WARNING | EKF Variance Warning | EKF velocity or position variance approaching limit | Monitor sensor health |
+| 16 | EKF_Check | 2 | `SUBSYS_16_ECODE_2` | CRITICAL | EKF Failsafe / Bad Variance Triggered | High velocity or position innovation variance; compass/IMU disagreement; GPS glitch | Switch to manual mode (AltHold/Land), inspect compass calibration and vibration levels |
+| 25 | Sub_Depth | 0 | `SUBSYS_25_ECODE_0` | WARNING | Depth / Pressure Sensor Anomaly | Underwater vehicle depth sensor or external pressure reading anomalous | Check pressure transducer |
+| 28 | EKF_Failsafe | 0 | `SUBSYS_28_ECODE_0` | CRITICAL | EKF Failsafe Triggered | EKF filter variance triggered emergency failsafe | Flight controller switched to Land or AltHold; inspect sensors |
+| 0 | All | 0 | `ECODE_0` | INFO | Error Resolved / Failsafe Cleared | Subsystem fault condition cleared and returned to nominal operating limits | Normal system state restored |
 | 17 | Navigation | 1 | `SUBSYS_17_ECODE_1` | ERROR | Navigation Stuck | Vehicle unable to advance toward next waypoint (headwind, obstacle) | Check wind limits, inspect velocity saturation, take manual control |
 | 17 | Navigation | 2 | `SUBSYS_17_ECODE_2` | ERROR | Waypoint Track Drift | Cross-track error exceeds maximum permissible navigation corridor | Tune navigation PIDs, check GPS accuracy and position lag |
 | 18 | Baro | 1 | `SUBSYS_18_ECODE_1` | WARNING | Barometer Glitch | Pressure sudden spike due to propwash, sunlight or wind blast | Foam shield barometer sensor, check aerodynamic venting |
@@ -49,6 +58,7 @@ ArduPilot DataFlash logs record operational state changes and system triggers in
 
 | Event ID | Event Symbol | Severity | Title / Meaning | Probable Causes | Recommended Actions |
 |---|---|---|---|---|---|
+| 8 | `EV_8` | INFO | GCS Failsafe / State Changed | Telemetry link packet received or state transition | Normal telemetry operations |
 | 10 | `EV_10` | INFO | Armed | Motors armed by pilot or GCS | Normal operation; proceed with flight plan |
 | 11 | `EV_11` | INFO | Disarmed | Motors disarmed after landing or timeout | Normal operation |
 | 15 | `EV_15` | INFO | Auto Armed | Vehicle auto-armed by autonomous mission | Verify perimeter clear before autonomous motor spin |
@@ -96,3 +106,60 @@ ArduPilot DataFlash logs record operational state changes and system triggers in
 - **Description**: EKF has declared its state estimate invalid and triggered emergency failsafe.
 - **Probable Causes**: Severe sensor disagreement, compass calibration error, GPS glitch.
 - **Recommended Actions**: Land immediately; perform 3D compass calibration; verify IMU vibration dampers.
+
+### [ERR-16-2] SUBSYS 16 CODE 2 (EKF Failsafe Triggered)
+- **Subsystem**: EKF_Check (Extended Kalman Filter Check)
+- **Severity**: CRITICAL
+- **Description**: EKF Check triggered an emergency failsafe due to excessive velocity or position innovation variances. Subsystem 16 ECode 2 indicates active EKF failsafe.
+- **Probable Causes**: Magnetometer interference during high motor throttle; GPS multi-path or satellite loss; optical flow tracking loss; severe airframe vibration.
+- **Recommended Actions**: Switch to manual altitude hold or land; inspect compass offsets and vibration damping; verify GPS antenna clearance from video transmitters.
+
+### [ERR-16-0] SUBSYS 16 CODE 0 (EKF Failsafe Cleared / Error Resolved)
+- **Subsystem**: EKF_Check
+- **Severity**: INFO
+- **Description**: EKF innovation variance returned below failsafe threshold. ECode 0 indicates fault condition resolved and normal filter operation restored.
+- **Probable Causes**: Vehicle stabilized after temporary sensor anomaly or GPS signal regained.
+- **Recommended Actions**: Monitor vehicle stability; continue flight with caution.
+
+### [ECODE-0] Subsystem Error Cleared / Resolved
+- **Subsystem**: All
+- **Severity**: INFO
+- **Description**: In ArduPilot ERR logging, ECode 0 indicates that a previously active error or failsafe condition on the subsystem has been cleared/resolved. It marks recovery to nominal flight state.
+- **Probable Causes**: Transient disturbance ended; pilot intervention recovered attitude/altitude; sensor variance stabilized.
+- **Recommended Actions**: Log fault recovery timestamp; no immediate pilot action required.
+
+### [EV-8] Event 8 (GCS Telemetry Link)
+- **Subsystem**: GCS
+- **Severity**: INFO
+- **Description**: GCS telemetry connection event or heartbeat state transition.
+- **Probable Causes**: Routine link negotiation or signal margin fluctuation.
+- **Recommended Actions**: Monitor link quality.
+
+### [EV-10] Event 10 (Motors Armed)
+- **Subsystem**: FlightMode
+- **Severity**: INFO
+- **Description**: Motors armed by pilot stick gesture or GCS arm command.
+- **Probable Causes**: Normal pilot arming sequence.
+- **Recommended Actions**: Normal flight operations.
+
+### [EV-15] Event 15 (Auto Armed)
+- **Subsystem**: Autotune / Mission
+- **Severity**: INFO
+- **Description**: Vehicle auto-armed by autonomous flight plan.
+- **Probable Causes**: Mission execution sequence.
+- **Recommended Actions**: Normal flight operations.
+
+### [EV-25] Event 25 (Depth / Pressure Anomaly)
+- **Subsystem**: Sub_Depth
+- **Severity**: WARNING
+- **Description**: Depth or barometric pressure reading anomaly detected during flight.
+- **Probable Causes**: Propwash buffeting static port or pressure sensor reading glitch.
+- **Recommended Actions**: Check barometer foam shielding and sensor venting.
+
+### [EV-28] Event 28 (EKF Failsafe Event)
+- **Subsystem**: EKF_Failsafe
+- **Severity**: CRITICAL
+- **Description**: Autonomous flight controller triggered EKF emergency failsafe response (land or althold fallback).
+- **Probable Causes**: Optical flow dropped, compass variance exceeded threshold, or GPS glitch.
+- **Recommended Actions**: Inspect sensor telemetry and IMU logs.
+

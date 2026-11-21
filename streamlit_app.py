@@ -124,11 +124,12 @@ def detect_binary_format(data: bytes) -> tuple[str, str]:
 
 def iter_any_envelopes(data: bytes) -> list[EventRecord]:
     """Decode envelopes from either Contract v0 wire (<HBBIQII) or envelope.cfg (>IQII)."""
-    if len(data) >= 2 and data[:2] == b"\x53\x46":
-        try:
-            return list(iter_envelopes(data))
-        except Exception:
-            pass
+    try:
+        records = list(iter_envelopes(data))
+        if records:
+            return records
+    except Exception:
+        pass
     # Try Big-Endian envelope.cfg: >IQII (20-byte header)
     HEADER = struct.Struct(">IQII")
     records = []
@@ -732,13 +733,13 @@ def _render_verdict_and_synthesis(
         html_data = f"<html><body><pre>{html.escape(jsonld_data)}</pre></body></html>"
         pdf_bytes = b"%PDF-1.4\n%%EOF"
 
-    c1, c2, c3, _ = st.columns([1, 1, 1, 5])
+    c1, c2, c3, _ = st.columns([1.2, 1.2, 1.2, 4.4])
     with c1:
-        st.download_button("Export JSON-LD", jsonld_data, "fss_report.jsonld", "application/ld+json")
+        st.download_button("JSON-LD", jsonld_data, "fss_report.jsonld", "application/ld+json", use_container_width=True)
     with c2:
-        st.download_button("Export HTML", html_data, "fss_report.html", "text/html")
+        st.download_button("HTML", html_data, "fss_report.html", "text/html", use_container_width=True)
     with c3:
-        st.download_button("Export PDF", pdf_bytes, "fss_report.pdf", "application/pdf")
+        st.download_button("PDF", pdf_bytes, "fss_report.pdf", "application/pdf", use_container_width=True)
 
     # Optional Collapsed Expanders for Data Gaps & Clock Skew
     gaps = synthesis.get("data_gaps") or evidence.get("data_gaps") or []
@@ -991,7 +992,7 @@ def main() -> None:
         manual_profile = st.selectbox(
             "Error Manual Profile",
             [
-                "Auto-Matched Profile (Recommended)",
+                "Auto-Matched (Default)",
                 "ArduPilot Flight DataFlash",
                 "PX4 Autopilot uORB",
                 "FSS Native Telemetry",
@@ -1021,7 +1022,7 @@ def main() -> None:
 
         # 2. Built-in profile
         if manual_profile != "Custom File Upload Only":
-            if manual_profile == "Auto-Matched Profile (Recommended)":
+            if manual_profile == "Auto-Matched (Default)":
                 if vendor_hint == "ardupilot":
                     active_vendor_entries.extend(load_builtin_manual("ardupilot"))
                     vendor_label = "ArduPilot (Auto-Matched)"
@@ -1288,6 +1289,7 @@ def main() -> None:
     # SINGLE UNIFIED KPI STRIP (No duplicate rows, text-overflow protected)
     # =========================================================================
     n_events = len(condensed_events)
+    raw_retrieved = len(retrieval_res.events)
     n_faults = sum(1 for e in condensed_events if is_critical_event(getattr(e, 'event_type', 0)))
     duration_s = max(0.1, span_s)
     is_full = analysis_scope.startswith("Full")
@@ -1297,8 +1299,15 @@ def main() -> None:
     rules_sub = f"{len(vendor_manual_matches)} matched"
     ipc_mode = "UDS Daemon" if (source_mode == "Java Telemetry Storage (IPC Engine)" or os.path.exists("/tmp/fss_bridge.sock")) else "Subprocess IPC"
 
+    if n_events < raw_retrieved:
+        events_val = f"{n_events} Active"
+        events_sub = f"{raw_retrieved} retrieved · {duration_s:.1f}s"
+    else:
+        events_val = f"{raw_retrieved}"
+        events_sub = f"{raw_retrieved} retrieved · {duration_s:.1f}s"
+
     _render_kpi_strip([
-        ("Events", str(n_events), f"{len(retrieval_res.events)} raw · {duration_s:.1f}s"),
+        ("Events", events_val, events_sub),
         ("Coverage", coverage_val, coverage_sub),
         ("Error Manual", rules_val, rules_sub),
         ("Storage / IPC", "Java BlockStore", ipc_mode),

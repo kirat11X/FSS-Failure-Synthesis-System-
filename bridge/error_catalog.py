@@ -275,11 +275,15 @@ def _parse_single_markdown_table(table_lines: list[str], vendor: str) -> list[Ve
 
     if "code" not in col_map:
         for idx, h in enumerate(raw_headers):
-            if "code" in h or "symbol" in h or "id" in h:
+            if ("code" in h or "symbol" in h or "error" in h or h == "id" or h.endswith("_id")) and not any(term in h for term in ("source", "agent", "node", "sensor", "device", "stream")):
                 col_map["code"] = idx
                 break
 
     if "code" not in col_map:
+        return []
+
+    # If the table doesn't have ANY error metadata columns (causes, actions, severity, description), it is not an error table
+    if not any(k in col_map for k in ("causes", "actions", "severity", "description")):
         return []
 
     entries: list[VendorErrorEntry] = []
@@ -307,15 +311,41 @@ def _parse_single_markdown_table(table_lines: list[str], vendor: str) -> list[Ve
 
         # Specific alias generation per vendor/structure
         if vendor == "ardupilot":
-            # If code is SUBSYS_14_ECODE_2, add ERR_14_2, [ERR-14-2], SUBSYS 14 CODE 2
+            # If code is SUBSYS_14_ECODE_2, add ERR_14_2, [ERR-14-2], SUBSYS 14 CODE 2, SUBSYS_14, Subsys 14
             m = re.match(r"^SUBSYS_(\d+)_ECODE_(\d+)$", code)
             if m:
                 s_id, e_id = m.group(1), m.group(2)
-                aliases.extend([f"ERR_{s_id}_{e_id}", f"[ERR-{s_id}-{e_id}]", f"SUBSYS {s_id} CODE {e_id}"])
-            # If EV_10, add EV 10
+                aliases.extend([
+                    f"ERR_{s_id}_{e_id}",
+                    f"[ERR-{s_id}-{e_id}]",
+                    f"SUBSYS {s_id} CODE {e_id}",
+                    f"SUBSYS_{s_id}",
+                    f"Subsys {s_id}",
+                    f"Subsystem {s_id}",
+                    f"EV_{s_id}",
+                    f"EV {s_id}",
+                ])
+                if e_id == "0":
+                    aliases.extend([
+                        f"SUBSYS_{s_id}_CLEARED",
+                        "ERROR_RESOLVED",
+                        "FAILSAFE_CLEARED",
+                        "ECODE_0",
+                    ])
+            # If EV_10, add EV 10, SUBSYS_10, Subsys 10
             ev_m = re.match(r"^EV_(\d+)$", code)
             if ev_m:
-                aliases.append(f"EV {ev_m.group(1)}")
+                ev_id = ev_m.group(1)
+                aliases.extend([
+                    f"EV {ev_id}",
+                    f"SUBSYS_{ev_id}",
+                    f"Subsys {ev_id}",
+                    f"Subsystem {ev_id}",
+                    f"SUBSYS_{ev_id}_ECODE_0",
+                    f"ERR_{ev_id}_0",
+                ])
+            if code in ("ECODE_0", "ERROR_RESOLVED"):
+                aliases.extend(["ECODE 0", "CODE 0", "ERROR_RESOLVED", "FAILSAFE_CLEARED", "RESOLVED"])
         elif vendor == "fss_native":
             # Add composite tags if event symbol and code are available
             ev_sym = cells[raw_headers.index("event symbol")].strip("`").strip() if "event symbol" in raw_headers else ""
@@ -621,7 +651,7 @@ def extract_error_codes_from_events(events: list[dict[str, Any]]) -> list[str]:
 
         fields = ev.get("fields") or {}
         if isinstance(fields, dict):
-            for k in ("status_code", "reason_code", "state_code", "code", "error_code", "ecode", "subsys", "subsystem"):
+            for k in ("status_code", "reason_code", "state_code", "code", "error_code", "ecode", "subsys", "subsystem", "subsystem_code"):
                 if k in fields:
                     v = fields[k]
                     _add(str(v))
@@ -637,20 +667,43 @@ def extract_error_codes_from_events(events: list[dict[str, Any]]) -> list[str]:
                             _add(f"{ename}_{v}")
                             _add(f"{ename}:{v}")
 
-            # ArduPilot compound error code
-            if "subsys" in fields and "ecode" in fields:
-                sub = fields["subsys"]
-                ecode = fields["ecode"]
+            # ArduPilot compound error code & event code
+            sub = fields.get("subsystem_code") if fields.get("subsystem_code") is not None else fields.get("subsys")
+            if sub is None:
+                sub = fields.get("subsystem")
+            ecode = fields.get("error_code") if fields.get("error_code") is not None else fields.get("ecode")
+
+            if sub is not None:
+                _add(f"SUBSYS_{sub}")
+                _add(f"Subsys {sub}")
+                _add(f"Subsystem {sub}")
+                _add(f"EV_{sub}")
+                _add(f"EV {sub}")
+
+            if sub is not None and ecode is not None:
                 _add(f"SUBSYS_{sub}_ECODE_{ecode}")
                 _add(f"ERR_{sub}_{ecode}")
                 _add(f"[ERR-{sub}-{ecode}]")
                 _add(f"SUBSYS {sub} CODE {ecode}")
+                if ecode == 0:
+                    _add("ERROR_RESOLVED")
+                    _add("FAILSAFE_CLEARED")
+                    _add("ECODE_0")
+                    _add(f"SUBSYS_{sub}_CLEARED")
+                    _add(f"SUBSYS_{sub}_ECODE_0")
+            elif ecode == 0:
+                _add("ERROR_RESOLVED")
+                _add("FAILSAFE_CLEARED")
+                _add("ECODE_0")
 
             # ArduPilot Event message (EV)
             if "id" in fields and (ename == "EV" or str(etype) == "EV"):
                 ev_id = fields["id"]
                 _add(f"EV_{ev_id}")
                 _add(f"EV {ev_id}")
+                _add(f"SUBSYS_{ev_id}")
+                _add(f"Subsys {ev_id}")
+                _add(f"Subsystem {ev_id}")
 
             # Common symbolic flags / PX4 error strings
             for val in fields.values():

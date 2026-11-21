@@ -458,64 +458,78 @@ def preflight_budget_guard(
         warnings.warn(msg, UserWarning, stacklevel=2)
         return evidence, False, msg
 
-    # Identify anomalies that MUST be preserved
+    # Identify anomalies, faults, errors, and state transitions that MUST be preserved
     anomalous_indices = set()
     for idx, ev in enumerate(all_events):
-        name = ev.get("event_name") or ev.get("event_type") or ""
-        status = ev.get("decode_status")
-        fields = ev.get("fields", {})
+        name = str(ev.get("event_name") or ev.get("event_type") or "").upper()
+        status = str(ev.get("decode_status") or "").upper()
+        fields = ev.get("fields", {}) or {}
 
-        if status not in (None, "SUCCESS"):
+        if status and status not in ("SUCCESS", "DECODED"):
             anomalous_indices.add(idx)
             continue
-        if name in ("AVOIDANCE", "LEFT_FORMATION", "ERROR_EVENT"):
+        if any(kw in name for kw in ("AVOID", "LEFT_FORMATION", "ERROR", "ERR", "EV", "FAULT", "WARN", "FAIL", "ALARM")):
             anomalous_indices.add(idx)
             continue
+        for k, v in fields.items():
+            k_lower = k.lower()
+            if any(term in k_lower for term in ("error_code", "ecode", "fault_code", "reason_code", "timeout_count")):
+                if isinstance(v, (int, float)) and v > 0:
+                    anomalous_indices.add(idx)
+                    break
+            elif k_lower == "state_code" and isinstance(v, (int, float)) and v > 0:
+                anomalous_indices.add(idx)
+                break
+            elif k_lower in ("status_name", "reason", "detail", "state") and isinstance(v, str):
+                if any(term in v.upper() for term in ("FAIL", "ERROR", "TIMEOUT", "DEGRADED", "COLLISION", "LEFT_FORMATION", "EMERGENCY")):
+                    anomalous_indices.add(idx)
+                    break
         for (r_name, key, val), _ in RULES.items():
             if name == r_name and fields.get(key) == val:
                 anomalous_indices.add(idx)
                 break
 
-    # Deterministic compaction: Collapse long consecutive nominal runs into span summaries
-    compacted_events: list[dict[str, Any]] = []
-    run_buffer: list[dict[str, Any]] = []
+    # Realistic available event token budget computation:
+    # available = num_ctx - system_tokens - rag_tokens - reserved_output - safety_margin
+    system_tokens = estimate_tokens(SYSTEM_PROMPT)
+    knowledge_tokens = estimate_tokens(json.dumps(knowledge, default=str)) if knowledge else 0
+    query_tokens = estimate_tokens(query)
+    safety_margin = 256
+    available_event_budget = max(400, available_prompt_budget - system_tokens - knowledge_tokens - query_tokens - safety_margin)
 
-    def flush_run() -> None:
-        if not run_buffer:
-            return
-        if len(run_buffer) <= 2:
-            compacted_events.extend(run_buffer)
-        else:
-            first = run_buffer[0]
-            last = run_buffer[-1]
-            compacted_events.append({
-                "event_id": f"ev-span-{first['source_id']}-{first['timestamp_ns']}",
-                "source_id": first["source_id"],
-                "timestamp_ns": first["timestamp_ns"],
-                "event_type": first.get("event_type"),
-                "event_name": "NOMINAL_SPAN",
-                "decode_status": "COMPACTED_BY_BUDGET_GUARD",
-                "fields": {
-                    "nominal_event_count": len(run_buffer),
-                    "span_start_ns": first["timestamp_ns"],
-                    "span_end_ns": last["timestamp_ns"],
-                    "event_pattern": first.get("event_name") or first.get("event_type"),
-                },
-                "interpreted_fields": [],
-            })
-        run_buffer.clear()
+    # Subword-calibrated event tokens per event
+    sample_size = min(len(all_events), 25)
+    sample_text = "\n".join(str(all_events[i]) for i in range(sample_size))
+    avg_tokens_per_event = max(35, estimate_tokens(sample_text) // max(1, sample_size))
 
-    for idx, ev in enumerate(all_events):
-        if idx in anomalous_indices:
-            flush_run()
-            compacted_events.append(ev)
-        else:
-            if run_buffer and run_buffer[-1].get("source_id") != ev.get("source_id"):
-                flush_run()
-            run_buffer.append(ev)
-    flush_run()
+    # Upper bound on total events that can fit inside available event budget
+    max_budget_events = max(10, available_event_budget // avg_tokens_per_event)
+    target_event_count = min(len(all_events), max_budget_events)
 
-    # Re-evaluate token count after span compaction
+    critical_indices = sorted(anomalous_indices)
+    nominal_indices = [i for i in range(len(all_events)) if i not in anomalous_indices]
+
+    if len(all_events) <= target_event_count:
+        final_indices = list(range(len(all_events)))
+    elif len(critical_indices) >= target_event_count:
+        # Downsample critical events evenly if critical alone exceed budget
+        step = (len(critical_indices) - 1) / max(1, (target_event_count - 1))
+        final_indices = sorted({critical_indices[round(i * step)] for i in range(target_event_count)})
+    else:
+        # Keep 100% of critical events, fill remainder with nominal evenly across timeline
+        selected_indices = set(critical_indices)
+        nominal_budget = target_event_count - len(critical_indices)
+        step = (len(nominal_indices) - 1) / max(1, (nominal_budget - 1))
+        for i in range(nominal_budget):
+            idx = round(i * step)
+            if idx < len(nominal_indices):
+                selected_indices.add(nominal_indices[idx])
+        final_indices = sorted(selected_indices)
+
+    compacted_events: list[dict[str, Any]] = [all_events[i] for i in final_indices]
+    critical_event_objs = [all_events[i] for i in critical_indices]
+
+    # Re-evaluate token count after proportional compaction
     compacted_evidence = dict(evidence)
     compacted_evidence["events"] = compacted_events
 
@@ -526,21 +540,42 @@ def preflight_budget_guard(
         exemplars=exemplars,
         effective_num_ctx=effective_num_ctx,
         _skip_budget_guard=True,
+        vendor_manual_matches=vendor_manual_matches,
     )
     est_prompt_tokens2 = estimate_tokens(SYSTEM_PROMPT) + estimate_tokens(test_context2)
 
-    # If still over budget, window strictly around anomalies
+    # Progressively trim nominal events if still slightly over budget
+    while est_prompt_tokens2 > available_prompt_budget and len(compacted_events) > len(critical_indices) + 2:
+        current_nominal = [ev for ev in compacted_events if ev.get("event_id") not in {all_events[i].get("event_id") for i in critical_indices}]
+        if not current_nominal:
+            break
+        to_remove_ids = {ev.get("event_id") for ev in current_nominal[1::2]}
+        if not to_remove_ids and current_nominal:
+            to_remove_ids = {current_nominal[0].get("event_id")}
+        compacted_events = [ev for ev in compacted_events if ev.get("event_id") not in to_remove_ids]
+        compacted_evidence["events"] = compacted_events
+        test_context2 = build_llm_context(
+            compacted_evidence,
+            query,
+            knowledge,
+            exemplars=exemplars,
+            effective_num_ctx=effective_num_ctx,
+            _skip_budget_guard=True,
+            vendor_manual_matches=vendor_manual_matches,
+        )
+        est_prompt_tokens2 = estimate_tokens(SYSTEM_PROMPT) + estimate_tokens(test_context2)
+
+    # Final fallback if STILL over budget: clamp strictly to max_budget_events
     if est_prompt_tokens2 > available_prompt_budget:
-        if anomalous_indices:
-            # Keep all anomalies plus immediate neighbours
-            window_indices = set(anomalous_indices)
-            for a_idx in anomalous_indices:
-                window_indices.add(max(0, a_idx - 1))
-                window_indices.add(min(len(all_events) - 1, a_idx + 1))
-            final_events = [all_events[i] for i in sorted(window_indices)]
-        else:
-            final_events = all_events[:20]
-        compacted_evidence["events"] = final_events
+        crit_set = {all_events[i].get("event_id") for i in critical_indices}
+        crits_in_compacted = [ev for ev in compacted_events if ev.get("event_id") in crit_set]
+        nominal_in_compacted = [ev for ev in compacted_events if ev.get("event_id") not in crit_set]
+        compacted_events = crits_in_compacted[:max_budget_events]
+        if len(compacted_events) < max_budget_events and nominal_in_compacted:
+            rem = max_budget_events - len(compacted_events)
+            compacted_events.extend(nominal_in_compacted[:rem])
+        compacted_events = sorted(compacted_events, key=lambda e: e.get("timestamp_ns", 0))
+        compacted_evidence["events"] = compacted_events
 
     # Add explicit Data Gap record for budget compaction
     existing_gaps = list(compacted_evidence.get("data_gaps") or [])
@@ -944,11 +979,11 @@ def deterministic_synthesize(
             })
 
         if name == "ERROR_EVENT":
-            sub_c = fields.get("subsystem_code") or fields.get("subsystem")
-            err_c = fields.get("error_code") or fields.get("ecode")
+            sub_c = fields.get("subsystem_code") if fields.get("subsystem_code") is not None else fields.get("subsystem")
+            err_c = fields.get("error_code") if fields.get("error_code") is not None else fields.get("ecode")
             anomalies.append({
                 **e,
-                "severity": "high",
+                "severity": "high" if (err_c is not None and err_c > 0) else "medium",
                 "problem": f"Subsystem error event (subsystem={sub_c}, error_code={err_c})",
             })
 
