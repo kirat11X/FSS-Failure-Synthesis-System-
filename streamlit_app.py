@@ -642,13 +642,13 @@ def _render_masthead(model_status: dict[str, Any], trace_id: str) -> None:
     )
     # Render an invisible title element so AppTest at.title captures it without double-rendering visually
     st.markdown('<div class="fss-sr-only">', unsafe_allow_html=True)
-    st.title("Failure Synthesis System // Telemetry Diagnostics Terminal")
+    st.title("FSS - Failure Synthesis System")
     st.markdown('</div>', unsafe_allow_html=True)
 
     header_html = (
         f'<div class="fss-masthead">'
         f'<div>'
-        f'<div class="fss-title">FSS // TELEMETRY DIAGNOSTICS TERMINAL</div>'
+        f'<div class="fss-title">FSS - Failure Synthesis System</div>'
         f'<div class="fss-subtitle">Java 64KB BlockStore · Contract v0 · Hybrid RAG · 4-Tier Epistemic Auditor</div>'
         f'</div>'
         f'<div style="display:flex;gap:0.5rem;align-items:center;">'
@@ -771,7 +771,7 @@ def _render_verdict_and_synthesis(
 
 def main() -> None:
     st.set_page_config(
-        page_title="Failure Synthesis System (FSS) — Telemetry Diagnostics Terminal",
+        page_title="FSS - Failure Synthesis System",
         page_icon="📟",
         layout="wide",
         initial_sidebar_state="expanded",
