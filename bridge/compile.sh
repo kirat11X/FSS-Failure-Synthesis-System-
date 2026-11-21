@@ -41,6 +41,7 @@ java bridge/CompileHelper.java -cp "fss-core/target/classes" -d fss-core/target/
 # 3. Compile Ingestion & Retrieval subsystem sources
 if [ -n "$JACKSON_CP" ]; then
   java bridge/CompileHelper.java -cp "fss-core/target/classes:$JACKSON_CP" -d fss-core/target/classes \
+      fss-core/src/main/java/Retrieval/StoreBounds.java \
       fss-core/src/main/java/Ingestion/IngestionResult.java \
       fss-core/src/main/java/Ingestion/TelemetryIngestor.java \
       fss-core/src/main/java/Ingestion/FileIngestor.java \

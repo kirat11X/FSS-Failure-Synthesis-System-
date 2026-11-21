@@ -25,8 +25,10 @@ from bridge.java_retriever import (
     JavaReceipt,
     JavaRetriever,
     JavaStoreLayout,
+    StoreBounds,
     detect_java_store_layout,
     extract_unseen_zip,
+    plan_bounded_retrieval_slices,
     stage_unseen_dat,
 )
 from bridge.synthesizer import (
@@ -294,3 +296,103 @@ def test_external_zip_archive_flow(tmp_path: Path):
     layout = detect_java_store_layout(extracted)
     assert layout.is_valid
     assert layout.layout_type == "segmented_directory"
+
+
+def test_plan_bounded_retrieval_slices_unit():
+    """Unit test for bounded slice planning ensuring Contract v0 MAX_WINDOW_NS (1h) compliance."""
+    max_w = 3600 * 1_000_000_000
+
+    # 1. Empty windows
+    assert plan_bounded_retrieval_slices([], None, None) == []
+
+    # 2. Single short window
+    slices = plan_bounded_retrieval_slices([(1000, 2000)])
+    assert slices == [(1000, 2000)]
+
+    # 3. Window exceeding 1 hour: must be chunked into <= max_w slices
+    large_span = 7500 * 1_000_000_000
+    slices = plan_bounded_retrieval_slices([(0, large_span)])
+    assert len(slices) == 3
+    assert slices[0] == (0, max_w)
+    assert slices[1] == (max_w, 2 * max_w)
+    assert slices[2] == (2 * max_w, large_span)
+    for s_start, s_end in slices:
+        assert s_end - s_start <= max_w
+
+    # 4. Adjacent segments within 1 hour: must be merged into 1 slice
+    slices = plan_bounded_retrieval_slices([(100, 500), (600, 1000), (1200, 1500)])
+    assert len(slices) == 1
+    assert slices == [(100, 1500)]
+
+    # 5. Segments separated by > 1 hour: must remain distinct bounded slices
+    seg1 = (1_000_000_000, 1_100_000_000)
+    seg2 = (10_000_000_000_000, 10_000_100_000_000)  # > 2.5 hours later
+    slices = plan_bounded_retrieval_slices([seg1, seg2])
+    assert len(slices) == 2
+    assert slices[0] == seg1
+    assert slices[1] == seg2
+
+
+def test_external_unseen_multi_segment_real_download_store():
+    """Test Java-owned bounds discovery & multi-slice retrieval against real external unseen store.
+    
+    Verifies:
+      1. Bounds discovery discovers Nov 19, 2026 timestamps without hardcoding 2026-10-08.
+      2. Segments spanning ~4.18 hours (> 3600s) are cleanly retrieved in bounded slices.
+      3. Python never opens .dat files directly; all reading is done by Java.
+      4. Zero repo pollution (no files added to repo root).
+    """
+    real_store_path = Path("/home/kirat/Downloads/test-data (2)")
+    if not real_store_path.exists():
+        pytest.skip(f"{real_store_path} not found in this environment")
+
+    # 1. Structural inspection via Java layout detector
+    layout = detect_java_store_layout(real_store_path)
+    assert layout.is_valid
+    assert layout.layout_type == "segmented_directory"
+    assert layout.segment_count == 4
+
+    # 2. Stage 1: Java-owned bounds discovery over IPC
+    test_trace_id = "0123456789abcdef0123456789abcdef"
+    retriever = JavaRetriever.for_external_store(real_store_path)
+    bounds = retriever.get_store_bounds(trace_id=test_trace_id)
+    assert bounds.status == "OK"
+    assert bounds.segment_count == 4
+    assert bounds.block_count == 996
+    assert bounds.min_ts_ns == 1795069921815384500  # Nov 19, 2026
+    assert bounds.max_ts_ns == 1795085029688285900  # Nov 19, 2026 ~4.18 hours later
+    assert len(bounds.segment_windows) == 4
+    assert set(bounds.known_sources) == {1, 2, 3}
+
+    # Verify slice planning merges first 3 segments (< 1h) and leaves segment 4 (> 4h away)
+    slices = plan_bounded_retrieval_slices(bounds.segment_windows, bounds.min_ts_ns, bounds.max_ts_ns)
+    assert len(slices) == 2
+    max_w = 3600 * 1_000_000_000
+    for s_start, s_end in slices:
+        assert s_end - s_start <= max_w
+
+    # 3. Stage 1: Retrieve full dataset through Java bounded slices
+    envelope = retriever.retrieve_full_dataset(source=ALL, max_events=2000, trace_id=test_trace_id)
+    assert envelope.status == "OK"
+    assert envelope.count == 996
+    assert len(envelope.events) == 996
+    assert envelope.trace_id == test_trace_id
+
+    receipt = retriever.get_last_receipt()
+    assert receipt is not None
+    assert receipt.events_returned == 996
+    assert receipt.slices_queried == 2
+    assert receipt.segments_detected == 4
+    assert receipt.min_ts_ns == bounds.min_ts_ns
+    assert receipt.max_ts_ns == bounds.max_ts_ns
+    assert receipt.trace_id == test_trace_id
+
+    # 4. Strict Isolation: zero repo pollution
+    git_stat = subprocess.run(
+        ["git", "status", "--porcelain", "fixtures/", "domain_manuals/", "test_data/"],
+        capture_output=True,
+        text=True,
+        cwd=str(ROOT_DIR),
+    )
+    assert git_stat.stdout.strip() == "", f"Repo pollution detected: {git_stat.stdout}"
+

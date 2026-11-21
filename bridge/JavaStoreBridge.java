@@ -53,6 +53,7 @@ public final class JavaStoreBridge {
             switch (command) {
                 case "ingest" -> runIngest(args, protocolOut);
                 case "retrieve" -> runRetrieve(args, protocolOut);
+                case "bounds", "store_bounds" -> runBounds(args, protocolOut);
                 case "worker" -> runWorker(args);
                 case "synthesize", "pipeline" -> runPipeline(args, protocolOut);
                 default -> {
@@ -356,6 +357,128 @@ public final class JavaStoreBridge {
         } catch (Exception e) {
             JavaBridgeWorker.logStructured(traceId, "ERROR", "Retrieve failed: " + e.getMessage());
             throw new IOException("Retrieve error: " + e.getMessage(), e);
+        }
+    }
+
+    private static void runBounds(String[] args, OutputStream protocolOut) throws Exception {
+        String storePath = null;
+        String traceId = extractTraceId(args);
+
+        for (int i = 1; i < args.length; i++) {
+            switch (args[i]) {
+                case "--store" -> storePath = args[++i];
+                case "--trace-id" -> traceId = args[++i];
+                default -> {
+                    if (storePath == null && !args[i].startsWith("-")) {
+                        storePath = args[i];
+                    }
+                }
+            }
+        }
+
+        if (storePath == null) {
+            System.err.println("Error: --store <path> is required for bounds");
+            System.exit(1);
+        }
+
+        Path projectRoot = findProjectRoot();
+        Path sPath = Path.of(storePath);
+        if (!sPath.isAbsolute()) {
+            sPath = Files.exists(sPath) ? sPath.toAbsolutePath() : projectRoot.resolve(sPath);
+        }
+        if (!Files.exists(sPath)) {
+            System.err.println("Error: Store file not found: " + sPath);
+            System.exit(1);
+        }
+
+        Path rootDir = Files.isDirectory(sPath) ? sPath : sPath.getParent();
+        if (rootDir != null && (Files.exists(rootDir.resolve("block-metadata.dat")) || Files.exists(rootDir.resolve("segments")))) {
+            // Segmented store layout
+            Path blocksDat = rootDir.resolve("blocks.dat");
+            Path metaDat = rootDir.resolve("block-metadata.dat");
+            Path envCfg = rootDir.resolve("envelope.cfg");
+            if (!Files.exists(envCfg)) {
+                envCfg = projectRoot.resolve("fss-core").resolve("envelope.cfg");
+            }
+            Storage.EnvelopeConfig env = Files.exists(envCfg)
+                    ? Storage.EnvelopeConfig.load(envCfg, ByteOrder.BIG_ENDIAN)
+                    : null;
+            Storage.StorageConfig cfg = new Storage.StorageConfig(
+                    rootDir, 65536, 1048576, 4096, 60000, env
+            );
+            Storage.BlockStore bStore = new Storage.BlockStore(blocksDat);
+            Storage.BlockMetadataStore mStore = new Storage.BlockMetadataStore(metaDat, 65536);
+            Storage.SegmentMetadataStore sStore = new Storage.SegmentMetadataStore(rootDir);
+            try {
+                Retrieval.RetrievalService rService = new Retrieval.RetrievalService(cfg, bStore, mStore, sStore);
+                Retrieval.StoreBounds bounds = rService.discoverBounds();
+                StringBuilder sb = new StringBuilder();
+                sb.append("{\"status\":\"").append(bounds.status()).append("\",");
+                sb.append("\"trace_id\":\"").append(traceId).append("\",");
+                if (bounds.min_ts_ns() != null) {
+                    sb.append("\"min_ts_ns\":\"").append(bounds.min_ts_ns()).append("\",");
+                    sb.append("\"max_ts_ns\":\"").append(bounds.max_ts_ns()).append("\",");
+                }
+                sb.append("\"segment_count\":").append(bounds.segment_count()).append(",");
+                sb.append("\"block_count\":").append(bounds.block_count()).append(",");
+                sb.append("\"segment_windows\":[");
+                for (int j = 0; j < bounds.segment_windows().size(); j++) {
+                    Retrieval.StoreBounds.SegmentWindow sw = bounds.segment_windows().get(j);
+                    if (j > 0) sb.append(",");
+                    sb.append("{\"start_ts_ns\":\"").append(sw.start_ts_ns()).append("\",")
+                      .append("\"end_ts_ns\":\"").append(sw.end_ts_ns()).append("\",")
+                      .append("\"block_count\":").append(sw.block_count()).append("}");
+                }
+                sb.append("],\"known_sources\":[");
+                for (int j = 0; j < bounds.known_sources().size(); j++) {
+                    if (j > 0) sb.append(",");
+                    sb.append(bounds.known_sources().get(j));
+                }
+                sb.append("]}\n");
+                protocolOut.write(sb.toString().getBytes(StandardCharsets.UTF_8));
+                protocolOut.flush();
+                return;
+            } finally {
+                mStore.close();
+                bStore.close();
+            }
+        }
+
+        // Single-file store
+        try (AutoCloseable readLock = StoreLockManager.acquireReadLock(sPath)) {
+            try (BlockStore store = StoreLockManager.openWithRetry(sPath, 3000)) {
+                List<BlockInfo> blocks = store.blocks();
+                long minTs = -1L;
+                long maxTs = 0L;
+                boolean found = false;
+                int nonEmpBlocks = 0;
+                for (BlockInfo b : blocks) {
+                    if (!b.empty() && b.recordCount() > 0) {
+                        nonEmpBlocks++;
+                        if (!found || Long.compareUnsigned(b.minTsNs(), minTs) < 0) minTs = b.minTsNs();
+                        if (!found || Long.compareUnsigned(b.maxTsNs(), maxTs) > 0) maxTs = b.maxTsNs();
+                        found = true;
+                    }
+                }
+                StringBuilder sb = new StringBuilder();
+                if (found && Long.compareUnsigned(minTs, maxTs) <= 0) {
+                    long maxTsQuery = (maxTs == -1L) ? -1L : maxTs + 1L;
+                    sb.append("{\"status\":\"OK\",\"trace_id\":\"").append(traceId).append("\",");
+                    sb.append("\"min_ts_ns\":\"").append(Long.toUnsignedString(minTs)).append("\",");
+                    sb.append("\"max_ts_ns\":\"").append(Long.toUnsignedString(maxTsQuery)).append("\",");
+                    sb.append("\"segment_count\":1,\"block_count\":").append(blocks.size()).append(",");
+                    sb.append("\"segment_windows\":[{\"start_ts_ns\":\"").append(Long.toUnsignedString(minTs))
+                      .append("\",\"end_ts_ns\":\"").append(Long.toUnsignedString(maxTsQuery))
+                      .append("\",\"block_count\":").append(nonEmpBlocks).append("}],");
+                    sb.append("\"known_sources\":[]}\n");
+                } else {
+                    sb.append("{\"status\":\"EMPTY\",\"trace_id\":\"").append(traceId).append("\",");
+                    sb.append("\"segment_count\":0,\"block_count\":").append(blocks.size()).append(",");
+                    sb.append("\"segment_windows\":[],\"known_sources\":[]}\n");
+                }
+                protocolOut.write(sb.toString().getBytes(StandardCharsets.UTF_8));
+                protocolOut.flush();
+            }
         }
     }
 

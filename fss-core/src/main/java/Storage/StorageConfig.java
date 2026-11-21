@@ -15,7 +15,7 @@ public final class StorageConfig {
     public final long segmentDurationMillis;
     public final EnvelopeConfig envelope;
 
-    private StorageConfig(
+    public StorageConfig(
             Path root, int blockSize, int bufferCapacityBytes,
             int maxMessageSize, long segmentDurationMillis,
             EnvelopeConfig envelope) {
@@ -40,9 +40,10 @@ public final class StorageConfig {
                 : resolve(base, required(p, "root"));
         Path envelopePath = resolve(base, required(p, "envelopeConfig"));
 
-        int blockSize = integer(p, "blockSize");
-        int bufferCapacity = integer(p, "bufferCapacityBytes");
-        int maxMessage = integer(p, "maxMessageSize");
+        int configuredBlockSize = integer(p, "blockSize");
+        int blockSize = BlockMetadataStore.detectBlockSize(root.resolve("block-metadata.dat"), configuredBlockSize);
+        int bufferCapacity = Math.max(integer(p, "bufferCapacityBytes"), blockSize);
+        int maxMessage = Math.min(integer(p, "maxMessageSize"), Math.max(1, blockSize - Long.BYTES));
         long segmentDuration = longValue(p, "segmentDurationMillis");
 
         ByteOrder order = switch (p.getProperty("byteOrder", "BIG_ENDIAN").trim().toUpperCase()) {

@@ -86,8 +86,10 @@ from bridge.java_retriever import (
     JavaReceipt,
     JavaRetriever,
     JavaStoreLayout,
+    StoreBounds,
     detect_java_store_layout,
     extract_unseen_zip,
+    plan_bounded_retrieval_slices,
     stage_unseen_dat,
 )
 # Prevent CPU-only HuggingFace hangs in Streamlit interactive sessions when CUDA is absent or in tests
@@ -389,6 +391,7 @@ def cached_execute_retrieval(
     t_end_ns: int,
     max_events: int,
     _retriever: JavaRetriever,
+    trace_id: str | None = None,
 ) -> RetrievalResult:
     """Cache immutable BlockStore retrieval results."""
     source_arg = ALL if source_str == "ALL" else int(source_str)
@@ -397,6 +400,7 @@ def cached_execute_retrieval(
         t_start_ns=t_start_ns,
         t_end_ns=t_end_ns,
         max_events=max_events,
+        trace_id=trace_id,
     )
 
 
@@ -1077,7 +1081,9 @@ def main() -> None:
 
     # Single source of truth for model status
     model_status = probe_local_model_once()
-    trace_id = hashlib.sha256(f"{os.getpid()}-{datetime.now().isoformat()}".encode()).hexdigest()[:32]
+    if "trace_id" not in st.session_state:
+        st.session_state["trace_id"] = hashlib.sha256(f"{os.getpid()}-{datetime.now().isoformat()}".encode()).hexdigest()[:32]
+    trace_id = st.session_state["trace_id"]
 
     cache_mgr = get_bin_cache_manager()
 
@@ -1192,9 +1198,9 @@ def main() -> None:
             st.markdown("#### 📂 External Unseen Store Input")
 
             # Option A: Browse or Enter External Folder / File
-            c_browse, c_clear = st.columns([3, 1])
+            c_browse, c_clear = st.columns([2.2, 1])
             with c_browse:
-                if st.button("📁 Browse External Storage Folder...", use_container_width=True, help="Launch native system dialog to pick an external directory."):
+                if st.button("📁 Browse Folder", use_container_width=True, help="Launch native system dialog to pick an external directory."):
                     picked = pick_directory_native()
                     if picked:
                         st.session_state["external_store_input"] = picked
@@ -1326,6 +1332,9 @@ def main() -> None:
     # Ensure we have a valid retriever connection
     retriever_wrapper: ThreadSafeWrapper[JavaRetriever]
     sample_envelopes: list[EventRecord] = []
+    t_min: int | None = None
+    t_max: int | None = None
+    all_sources: list[int] = []
 
     try:
         if source_mode == "Java Telemetry Storage (IPC Engine)":
@@ -1346,12 +1355,20 @@ def main() -> None:
             if not sample_envelopes:
                 try:
                     with retriever_wrapper as ret:
-                        probe_env = ret.retrieve_envelope(ALL, 0, UINT64_MAX if ret.mode == "storage_ipc" else 1000, max_events=100)
-                        if probe_env.events:
-                            sample_envelopes = [e.to_event_record() for e in probe_env.events]
-                        elif probe_env.min_ts_ns and probe_env.max_ts_ns:
-                            t_min = probe_env.min_ts_ns
-                            t_max = probe_env.max_ts_ns
+                        bounds = ret.get_store_bounds(trace_id=trace_id)
+                        if bounds.status == "OK" and bounds.min_ts_ns is not None and bounds.max_ts_ns is not None:
+                            t_min = bounds.min_ts_ns
+                            t_max = bounds.max_ts_ns
+                            all_sources = list(bounds.known_sources)
+                            slices = plan_bounded_retrieval_slices(bounds.segment_windows, t_min, t_max)
+                            if slices:
+                                s_start, s_end = slices[0]
+                                probe_end = min(s_start + 60_000_000_000, s_end)
+                                if probe_end <= s_start:
+                                    probe_end = s_start + 1
+                                probe_env = ret.retrieve_envelope(ALL, s_start, probe_end, max_events=50, trace_id=trace_id)
+                                if probe_env.events:
+                                    sample_envelopes = [e.to_event_record() for e in probe_env.events]
                 except Exception:
                     pass
         elif chosen_fixtures:
@@ -1371,17 +1388,22 @@ def main() -> None:
 
     # Compute duration & event statistics
     if sample_envelopes:
-        all_sources = sorted({e.source_id for e in sample_envelopes})
-        t_min = min(e.timestamp_ns for e in sample_envelopes)
-        t_max = max(e.timestamp_ns for e in sample_envelopes)
+        all_sources = sorted(set(all_sources).union({e.source_id for e in sample_envelopes}))
+        t_min_val = min((t_min if t_min is not None else float("inf")), min(e.timestamp_ns for e in sample_envelopes))
+        t_max_val = max((t_max if t_max is not None else float("-inf")), max(e.timestamp_ns for e in sample_envelopes))
+        t_min = int(t_min_val)
+        t_max = int(t_max_val)
         span_s = max(1, -(-(t_max - t_min + 1) // 10**9))
-        duration_display = f"{span_s}s" if span_s < 60 else f"{span_s // 60}m {span_s % 60}s"
+        duration_display = f"{span_s}s" if span_s < 60 else (f"{span_s // 60}m {span_s % 60}s" if span_s < 3600 else f"{span_s // 3600}h {(span_s % 3600) // 60}m {span_s % 60}s")
+    elif t_min is not None and t_max is not None and t_min > 0:
+        span_s = max(1, -(-(t_max - t_min + 1) // 10**9))
+        duration_display = f"{span_s}s" if span_s < 60 else (f"{span_s // 60}m {span_s % 60}s" if span_s < 3600 else f"{span_s // 3600}h {(span_s % 3600) // 60}m {span_s % 60}s")
     else:
         all_sources = []
-        t_min = 1791454020000000000
-        t_max = 1791454025000000000
-        span_s = 5
-        duration_display = "5.0s"
+        t_min = 0
+        t_max = 1
+        span_s = 1
+        duration_display = "0.0s"
 
     # Display compact single-line status indicator using BinCacheManager
     with st.sidebar:
@@ -1621,7 +1643,7 @@ def main() -> None:
             with retriever_wrapper as retriever:
                 if analysis_scope.startswith("Full"):
                     # Whole dataset retrieval
-                    envelope = retriever.retrieve_full_dataset(source=source_arg, max_events=10000)
+                    envelope = retriever.retrieve_full_dataset(source=source_arg, max_events=10000, trace_id=trace_id)
                     wire_records = [ev.to_event_record() if hasattr(ev, "to_event_record") else ev for ev in envelope.events]
                     raw_decoded = decode_all(wire_records, registry)
                     condensed_dicts = condense_telemetry(raw_decoded, max_events_target=1000)
@@ -1661,6 +1683,7 @@ def main() -> None:
                         t_end_ns,
                         int(max_events_bound),
                         _retriever=retriever,
+                        trace_id=trace_id,
                     )
                     raw_decoded = decode_all(retrieval_res.events, registry)
                     condensed_events = raw_decoded
@@ -1685,6 +1708,9 @@ def main() -> None:
 
     # Display Java Retrieval Receipt Card
     if receipt is not None:
+        slices_info = f" ({receipt.slices_queried} bounded IPC slice{'s' if receipt.slices_queried > 1 else ''})" if getattr(receipt, "slices_queried", 1) > 0 else ""
+        min_utc = fmt_ns(receipt.min_ts_ns) if receipt.min_ts_ns else "N/A"
+        max_utc = fmt_ns(receipt.max_ts_ns) if receipt.max_ts_ns else "N/A"
         rec_html = f"""
         <div class="fss-card" style="margin-bottom: 1rem;">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 0.6rem;">
@@ -1701,7 +1727,10 @@ def main() -> None:
                 <div><span style="color:var(--muted);">Timestamp Span:</span> <code>[{receipt.min_ts_ns} .. {receipt.max_ts_ns}] ns</code></div>
                 <div><span style="color:var(--muted);">Trace ID:</span> <code>{html.escape(receipt.trace_id[:12])}</code></div>
             </div>
-            <div style="font-size:0.75rem; color:var(--muted); margin-top:0.45rem; font-family:'IBM Plex Mono',monospace;">
+            <div style="font-size:0.75rem; color:#8E9E99; margin-top:0.4rem; font-family:'IBM Plex Mono',monospace;">
+                UTC Range: <code>{min_utc}</code> → <code>{max_utc}</code> UTC{slices_info}
+            </div>
+            <div style="font-size:0.75rem; color:var(--muted); margin-top:0.25rem; font-family:'IBM Plex Mono',monospace;">
                 External Source Path: <code>{html.escape(receipt.external_path)}</code>
             </div>
         </div>
