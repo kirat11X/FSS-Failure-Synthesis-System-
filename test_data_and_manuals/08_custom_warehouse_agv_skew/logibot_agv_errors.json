@@ -1,0 +1,61 @@
+{
+  "errors": [
+    {
+      "error_code": "ROUTE_BLOCKED",
+      "subsystem": "Navigation_Planner",
+      "severity": "WARNING",
+      "title": "Aisle Navigation Path Blocked",
+      "description": "AGV detected aisle path obstruction by another vehicle or dropped cargo pallet",
+      "probable_causes": [
+        "Leading AGV battery exhaustion or emergency stop",
+        "Fallen parcel blocking optical guidance path"
+      ],
+      "recommended_actions": [
+        "Execute dynamic corridor replan",
+        "Notify warehouse fleet dispatch"
+      ]
+    },
+    {
+      "error_code": "LOW_BATTERY",
+      "subsystem": "Power_Management",
+      "severity": "CRITICAL",
+      "title": "AGV Battery Depleted Below Critical Threshold",
+      "description": "Traction battery state of charge fell below emergency cutoff limit (10%)",
+      "probable_causes": [
+        "High payload transport over long transit cycle",
+        "Degraded LiFePO4 battery cell internal resistance"
+      ],
+      "recommended_actions": [
+        "Dispatch recovery tug",
+        "Route to fast-charge inductive pad"
+      ]
+    },
+    {
+      "error_code": "ABORTED",
+      "subsystem": "Mission_Control",
+      "severity": "ERROR",
+      "title": "Warehouse Transport Task Aborted",
+      "description": "Active warehouse pick-and-place mission aborted due to vehicle immobilization",
+      "probable_causes": [
+        "Battery exhaustion",
+        "Drive motor fault"
+      ],
+      "recommended_actions": [
+        "Reassign task to available fleet unit"
+      ]
+    },
+    {
+      "error_code": "DELAYED",
+      "subsystem": "Mission_Control",
+      "severity": "WARNING",
+      "title": "Warehouse Transport Task Delayed",
+      "description": "Transport mission deadline delayed due to traffic congestion or rerouting",
+      "probable_causes": [
+        "Aisle obstruction requiring detour"
+      ],
+      "recommended_actions": [
+        "Monitor transit ETA"
+      ]
+    }
+  ]
+}

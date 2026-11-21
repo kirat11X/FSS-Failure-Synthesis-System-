@@ -1,0 +1,70 @@
+{
+  "errors": [
+    {
+      "error_code": "504",
+      "subsystem": "API_Gateway",
+      "severity": "CRITICAL",
+      "title": "Gateway Timeout",
+      "description": "Upstream API gateway timed out awaiting response from downstream microservice within deadline",
+      "probable_causes": [
+        "Database connection pool exhaustion",
+        "Downstream container CPU throttling",
+        "Unresponsive socket connection"
+      ],
+      "recommended_actions": [
+        "Scale database connection pool capacity",
+        "Profile downstream service RPC latency",
+        "Enable circuit breaker on downstream calls"
+      ]
+    },
+    {
+      "error_code": "500",
+      "subsystem": "Backend_Services",
+      "severity": "ERROR",
+      "title": "Internal Server Error",
+      "description": "Backend microservice encountered an unhandled runtime exception while processing request",
+      "probable_causes": [
+        "Database query failure",
+        "Null pointer dereference in business logic",
+        "Out of memory error in container"
+      ],
+      "recommended_actions": [
+        "Restart failing container pod",
+        "Inspect application error traces in logs",
+        "Verify database availability"
+      ]
+    },
+    {
+      "error_code": "POOL_EXHAUSTED",
+      "subsystem": "Database_Pool",
+      "severity": "CRITICAL",
+      "title": "Database Connection Pool Exhausted",
+      "description": "All connections in the database pool are checked out, causing incoming queries to block and time out",
+      "probable_causes": [
+        "Connection leak in transactional code block",
+        "Surge in concurrent HTTP traffic exceeding max_conns",
+        "Slow queries holding connections open"
+      ],
+      "recommended_actions": [
+        "Increase max_connections configuration parameter",
+        "Audit connection checkout duration and ensure connections close in finally blocks",
+        "Add read-replica database instances"
+      ]
+    },
+    {
+      "error_code": "SATURATED",
+      "subsystem": "Database_Pool",
+      "severity": "WARNING",
+      "title": "Database Pool Saturated",
+      "description": "Database pool utilization exceeded 80% of configured maximum connections",
+      "probable_causes": [
+        "Sudden spike in user requests",
+        "Sub-optimal database indexing causing slow queries"
+      ],
+      "recommended_actions": [
+        "Enable query performance profiling",
+        "Monitor pool queue wait times"
+      ]
+    }
+  ]
+}

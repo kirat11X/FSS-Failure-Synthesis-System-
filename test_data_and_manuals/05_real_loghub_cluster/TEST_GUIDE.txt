@@ -1,0 +1,26 @@
+================================================================================
+FSS TEST GUIDE: 05_real_loghub_cluster
+================================================================================
+
+1. BUNDLE SUMMARY:
+   - Binary File: loghub_distributed_ops.fss.bin (Contract v0 Little-Endian, ~60 KB, 1,905 events)
+   - Manual File: cluster_ops_errors.md (Markdown format, Distributed Cluster Ops manual)
+   - Domain: D6 Distributed Systems / Loghub
+
+2. STEP-BY-STEP UI VERIFICATION INSTRUCTIONS:
+   a. Open http://127.0.0.1:8501.
+   b. In sidebar under 'Storage & Data Source', select 'Upload Custom Binary (.bin / .fss.bin)'.
+   c. Upload 'loghub_distributed_ops.fss.bin'.
+   d. In 'Domain / Error Manual', upload 'cluster_ops_errors.md'.
+   e. Set 'Analysis Scope' to 'FULL DATASET (All Events)'.
+   f. Enter the query below and execute synthesis.
+
+3. SUGGESTED UI QUERY:
+   "Identify why the HDFS DataNode packet responder failed (error 1002) and correlate with ZooKeeper quorum status."
+
+4. EXPECTED OUTPUT & VALIDATION BADGES:
+   - Matched Error Rules: >= 2 rules matched (including 1002, 1010, 1011)
+   - Evidence Citations: [ev-...] pointing to HTTP_ERROR events with error_code 1002
+   - Manual Citations: [err-cluster_ops_errors-1002], [err-cluster_ops_errors-1010]
+   - Temporal Integrity: Clean sequence spanning ~20 minutes with zero epoch jumps.
+================================================================================

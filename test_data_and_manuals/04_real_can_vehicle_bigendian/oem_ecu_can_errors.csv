@@ -1,0 +1,7 @@
+code,subsystem,severity,title,causes,actions
+SENSOR_COMM_ERROR,Powertrain_ECU,ERROR,CAN Bus Sensor Communication Loss,CAN transceiver bus fault; harness connector pin backout,Inspect CAN bus termination resistance; reseat connector
+ACTUATOR_FAULT,Braking_System,CRITICAL,Electronic Brake Actuator Failure,Hydraulic pressure drop; solenoid valve coil open circuit,Bleed brake hydraulic lines; replace actuator assembly
+FAULT,ABS_Controller,CRITICAL,ABS System Major Fault,Wheel speed sensor signal loss; hydraulic modulator failure,Inspect wheel tone ring; scan ABS diagnostic codes
+PLAUSIBILITY_CHECK_FAILED,Chassis_Control,ERROR,Sensor Plausibility Check Mismatch,Conflicting speed inputs from left and right wheel sensors,Calibrate wheel speed sensors
+0x0402,ECU_Diagnostics,ERROR,ECU Fault Diagnostic Frame,Internal electronic control unit error flag,Perform DTC scan
+0x0403,ABS_Diagnostics,WARNING,ABS State Telemetry Frame,Anti-lock braking system state transition,Monitor wheel slip ratio

@@ -1,0 +1,27 @@
+================================================================================
+FSS TEST GUIDE: 01_real_ardupilot_log171
+================================================================================
+
+1. BUNDLE SUMMARY:
+   - Binary File: log171.bin (2.98 MB, real ArduPilot 3DR Iris flight DataFlash log)
+   - Manual File: ardupilot_corp_errors.md (Markdown format, ArduPilot vendor manual)
+   - Domain: D1 Drones / Autonomous Flight Control
+
+2. STEP-BY-STEP UI VERIFICATION INSTRUCTIONS:
+   a. Open the FSS Telemetry Diagnostics Terminal at http://127.0.0.1:8501
+   b. In the sidebar under 'Storage & Data Source', select 'Upload Custom Binary (.bin / .fss.bin)'.
+   c. Drag and drop 'log171.bin' into the binary file uploader.
+   d. In the 'Domain / Error Manual' uploader, drag and drop 'ardupilot_corp_errors.md'.
+   e. Verify the sidebar reports 5,000 events ingested and vendor detected as ArduPilot.
+   f. Under 'Analysis Scope', select 'FULL DATASET (All Events)' or use the slider.
+   g. Enter the suggested query below into the query bar and click 'Execute Synthesis'.
+
+3. SUGGESTED UI QUERY:
+   "Why did the autopilot trigger an EKF failsafe (SUBSYS_16_ECODE_2), when did it clear (SUBSYS_16_ECODE_0), and what does the vendor error manual prescribe?"
+
+4. EXPECTED OUTPUT & VALIDATION BADGES:
+   - Matched Error Rules: >= 7 rules matched (including SUBSYS_16_ECODE_2, SUBSYS_16_ECODE_0, EV_28)
+   - Evidence Citations: [ev-...] telemetry frames citing SUBSYS_16_ECODE_2 at ~1448149661149000192 ns
+   - Manual Citations: [err-ardupilot-subsys_16_ecode_2], [err-ardupilot-subsys_16_ecode_0]
+   - Time Duration: Realistic flight time (~5-10 minutes) around 2015-11-21, zero multi-year epoch jumps.
+================================================================================

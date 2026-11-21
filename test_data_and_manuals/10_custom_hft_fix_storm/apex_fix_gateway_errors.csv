@@ -1,0 +1,6 @@
+code,subsystem,severity,title,causes,actions
+TOO_LATE_TO_CANCEL,FIX_Cancel_Reject,WARNING,Order Cancel Rejected - Too Late to Cancel,Order already matched and executed on central limit order book,Treat order as filled; reconcile client position
+UNKNOWN_ORDER,FIX_Cancel_Reject,ERROR,Order Cancel Rejected - Unknown Order ID,OrigClOrdID not present in active matching book; order previously cancelled or expired,Verify ClOrdID generation algorithm
+REJECTED,FIX_Execution_Report,ERROR,Order Execution Rejected by Exchange Risk Engine,Pre-trade risk limit exceeded; price collar violation,Check buying power allocation and tick bounds
+0x0502,FIX_Engine,ERROR,FIX Cancel Reject Message Frame,Exchange rejected cancel request,Inspect reject reason code
+0x0503,FIX_Engine,NOTICE,FIX Execution Report Message Frame,Exchange execution report generated,Process order state change

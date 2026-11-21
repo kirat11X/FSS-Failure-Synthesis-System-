@@ -29,6 +29,7 @@ fss-core/lib/
 # Runtime data
 *.dat
 *.lock
+!test_data_and_manuals/**/*.dat
 fss-core/test-data/
 test_data/uploads/
 test_data/real_world/

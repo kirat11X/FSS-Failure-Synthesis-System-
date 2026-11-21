@@ -1,0 +1,26 @@
+================================================================================
+FSS TEST GUIDE: 03_real_rcaeval_microservices
+================================================================================
+
+1. BUNDLE SUMMARY:
+   - Binary File: rcaeval_boutique_cascade.fss.bin (Contract v0 Little-Endian, ~85 KB, 2,706 events)
+   - Manual File: boutique_cloud_errors.json (JSON format, Cloud Microservices manual)
+   - Domain: D2 Microservices / Cloud Architecture
+
+2. STEP-BY-STEP UI VERIFICATION INSTRUCTIONS:
+   a. Open http://127.0.0.1:8501.
+   b. In sidebar under 'Storage & Data Source', select 'Upload Custom Binary (.bin / .fss.bin)'.
+   c. Upload 'rcaeval_boutique_cascade.fss.bin'.
+   d. In 'Domain / Error Manual', upload 'boutique_cloud_errors.json'.
+   e. Verify the sidebar reports 2,706 events across services 101, 102, 103.
+   f. Enter the query below and execute synthesis.
+
+3. SUGGESTED UI QUERY:
+   "Trace the microservice cascade: why did HTTP 504 gateway timeouts occur and how is DB pool exhaustion implicated?"
+
+4. EXPECTED OUTPUT & VALIDATION BADGES:
+   - Matched Error Rules: >= 2 rules matched (including 504, 500, POOL_EXHAUSTED)
+   - Evidence Citations: [ev-...] pointing to HTTP_ERROR and DB_POOL_STATUS events
+   - Manual Citations: [err-boutique_cloud_errors-504], [err-boutique_cloud_errors-pool_exhausted]
+   - Cascade Flow: Demonstrates DB pool saturation -> query queuing -> 504 gateway timeout cascade.
+================================================================================

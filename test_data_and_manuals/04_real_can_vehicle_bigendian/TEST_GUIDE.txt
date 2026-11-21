@@ -1,0 +1,26 @@
+================================================================================
+FSS TEST GUIDE: 04_real_can_vehicle_bigendian
+================================================================================
+
+1. BUNDLE SUMMARY:
+   - Binary File: vehicle_can_bigendian.fss.bin (Contract v0 Big-Endian CAN frames, ~45 KB)
+   - Manual File: oem_ecu_can_errors.csv (CSV format, Automotive OEM ECU error catalog)
+   - Domain: D4 Autonomous Vehicles / CAN Bus
+
+2. STEP-BY-STEP UI VERIFICATION INSTRUCTIONS:
+   a. Open http://127.0.0.1:8501.
+   b. In sidebar under 'Storage & Data Source', select 'Upload Custom Binary (.bin / .fss.bin)'.
+   c. Upload 'vehicle_can_bigendian.fss.bin'.
+   d. In 'Domain / Error Manual', upload 'oem_ecu_can_errors.csv'.
+   e. Verify Big-Endian payloads decode cleanly without endian corruption.
+   f. Enter the query below and execute synthesis.
+
+3. SUGGESTED UI QUERY:
+   "Diagnose the automotive CAN bus fault, explain why the ECU logged SENSOR_COMM_ERROR, and confirm how unmapped CAN IDs were handled."
+
+4. EXPECTED OUTPUT & VALIDATION BADGES:
+   - Big-Endian Decoding: Wheel speeds and ECU faults decode cleanly with realistic values.
+   - Matched Error Rules: >= 2 rules matched (including SENSOR_COMM_ERROR, ACTUATOR_FAULT, FAULT)
+   - Opaque Handling (Hard Rule 10): Event 0x0499 remains UNKNOWN_EVENT_TYPE with 0 payload bytes leaked.
+   - Evidence Citations: [ev-...] pointing to ECU_FAULT and ABS_STATE frames.
+================================================================================

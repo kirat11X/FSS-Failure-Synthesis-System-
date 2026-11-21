@@ -1,0 +1,26 @@
+================================================================================
+FSS TEST GUIDE: 02_real_px4_baro_dropout
+================================================================================
+
+1. BUNDLE SUMMARY:
+   - Binary File: px4_real_flight.fss.bin (Contract v0 Little-Endian FSS binary, ~130 KB)
+   - Manual File: px4_autopilot_errors.txt (Plain-text format, PX4 Autopilot manual)
+   - Domain: D1 Drones / PX4 Autopilot
+
+2. STEP-BY-STEP UI VERIFICATION INSTRUCTIONS:
+   a. Open http://127.0.0.1:8501.
+   b. In the sidebar under 'Storage & Data Source', select 'Upload Custom Binary (.bin / .fss.bin)'.
+   c. Upload 'px4_real_flight.fss.bin'.
+   d. In 'Domain / Error Manual', upload 'px4_autopilot_errors.txt'.
+   e. Set 'Analysis Scope' to 'FULL DATASET (All Events)'.
+   f. Enter the query below and execute synthesis.
+
+3. SUGGESTED UI QUERY:
+   "Identify any barometer drift or diagnostic degradation in the PX4 telemetry, citing relevant fault frames and manual recommendations."
+
+4. EXPECTED OUTPUT & VALIDATION BADGES:
+   - Matched Error Rules: >= 2 rules matched (including DEGRADED, FAULT, DIAG_STATUS)
+   - Evidence Citations: [ev-...] pointing to 0x30 diagnostic event frames
+   - Manual Citations: [err-px4_autopilot_errors-degraded], [err-px4_autopilot_errors-fault]
+   - Timeline: Clean 60-second flight sequence with zero epoch discrepancies.
+================================================================================

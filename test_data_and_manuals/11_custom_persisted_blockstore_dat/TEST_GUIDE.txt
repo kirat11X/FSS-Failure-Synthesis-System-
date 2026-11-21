@@ -1,0 +1,26 @@
+================================================================================
+FSS TEST GUIDE: 11_custom_persisted_blockstore_dat
+================================================================================
+
+1. BUNDLE SUMMARY:
+   - Store File: recovered_blockstore.dat (196 KB, pre-persisted 64KB CRC-32C Java BlockStore)
+   - Manual File: aerodrone_inc_manual.md (Markdown format, AeroDrone Inc. manual)
+   - Domain: Storage Engine Core / Direct BlockStore Persistence
+
+2. STEP-BY-STEP UI VERIFICATION INSTRUCTIONS:
+   a. Open http://127.0.0.1:8501.
+   b. In sidebar under 'Storage & Data Source', select 'Existing Java BlockStore (.dat)'.
+   c. Enter the path: 'test_data_and_manuals/11_custom_persisted_blockstore_dat/recovered_blockstore.dat'.
+   d. In 'Domain / Error Manual', upload 'aerodrone_inc_manual.md'.
+   e. Click 'Load BlockStore Data'.
+   f. Enter the query below and execute synthesis.
+
+3. SUGGESTED UI QUERY:
+   "Analyze the multi-agent failure stored in this persisted BlockStore and explain the root cause."
+
+4. EXPECTED OUTPUT & VALIDATION BADGES:
+   - Storage Engine Badge: 64KB CRC-32C BlockStore (Verified).
+   - Zero Conversion Overhead: Directly queries the persistent Java BlockStore over IPC without re-ingesting raw binary.
+   - Matched Error Rules: >= 4 rules matched (LIDAR_TIMEOUT, COLLISION_RISK, LEFT_FORMATION, DEGRADED)
+   - Citations: [ev-...] and [err-aerodrone_inc_manual-...]
+================================================================================

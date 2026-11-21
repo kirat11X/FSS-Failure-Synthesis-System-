@@ -989,7 +989,7 @@ def main() -> None:
         # 1. Custom manual file
         if custom_manual_file is not None:
             c_bytes = custom_manual_file.getvalue()
-            custom_entries = parse_error_manual(c_bytes, custom_manual_file.name, vendor="custom")
+            custom_entries = parse_error_manual(c_bytes, custom_manual_file.name, vendor="auto")
             active_vendor_entries.extend(custom_entries)
             vendor_label = f"Custom ({custom_manual_file.name})"
 
