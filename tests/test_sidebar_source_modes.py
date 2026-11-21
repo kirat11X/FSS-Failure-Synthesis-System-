@@ -35,7 +35,7 @@ def test_sidebar_has_exactly_four_clean_source_modes():
         "Upload Custom Binary (.bin / .fss.bin)",
         "Auto-Simulate Unseen Pipeline (Live)",
         "Golden Fixtures (fixtures/golden)",
-        "Existing Java BlockStore (.dat)",
+        "Open Java BlockStore (.dat / Folder)",
         "Java Telemetry Storage (IPC Engine)",
     ]
 

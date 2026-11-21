@@ -34,7 +34,10 @@ public final class StorageConfig {
         }
 
         Path base = propertiesPath.toAbsolutePath().getParent();
-        Path root = resolve(base, required(p, "root"));
+        String sysRoot = System.getProperty("fss.storage.dir");
+        Path root = (sysRoot != null && !sysRoot.isBlank())
+                ? resolve(base, sysRoot)
+                : resolve(base, required(p, "root"));
         Path envelopePath = resolve(base, required(p, "envelopeConfig"));
 
         int blockSize = integer(p, "blockSize");

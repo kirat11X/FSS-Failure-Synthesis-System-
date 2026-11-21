@@ -186,6 +186,7 @@ class RetrievalEnvelope(BaseModel):
     min_ts_ns: int | None = Field(default=None, description="Earliest recorded timestamp in store")
     max_ts_ns: int | None = Field(default=None, description="Latest recorded timestamp in store")
     scope: Literal["full_dataset", "interval"] | None = Field(default=None, description="Query scope")
+    receipt: dict[str, Any] | None = Field(default=None, description="Java retrieval receipt metadata")
 
     @field_validator("min_ts_ns", "max_ts_ns", mode="before")
     @classmethod

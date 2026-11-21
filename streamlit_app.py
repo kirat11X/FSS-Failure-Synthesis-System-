@@ -26,7 +26,9 @@ import json
 import os
 import random
 import re
+import shutil
 import struct
+import subprocess
 import sys
 import tempfile
 import threading
@@ -80,7 +82,14 @@ from bridge.hybrid_rag import (
     HybridRetriever,
     enrich_evidence_with_manual,
 )
-from bridge.java_retriever import JavaRetriever
+from bridge.java_retriever import (
+    JavaReceipt,
+    JavaRetriever,
+    JavaStoreLayout,
+    detect_java_store_layout,
+    extract_unseen_zip,
+    stage_unseen_dat,
+)
 # Prevent CPU-only HuggingFace hangs in Streamlit interactive sessions when CUDA is absent or in tests
 try:
     if "PYTEST_CURRENT_TEST" in os.environ or "FORCE_LOCAL_HF" not in os.environ:
@@ -128,6 +137,48 @@ def detect_binary_format(data: bytes) -> tuple[str, str]:
         except Exception:
             pass
     return "BINARY ENVELOPE", "auto"
+
+
+def pick_directory_native() -> str | None:
+    """Prompt the operator with a native OS folder dialog using zenity, kdialog, or tkinter."""
+    if shutil.which("zenity"):
+        try:
+            res = subprocess.run(
+                ["zenity", "--file-selection", "--directory", "--title=Select Java BlockStore Folder"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                return res.stdout.strip()
+        except Exception:
+            pass
+    if shutil.which("kdialog"):
+        try:
+            res = subprocess.run(
+                ["kdialog", "--getexistingdirectory", "--title", "Select Java BlockStore Folder"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                return res.stdout.strip()
+        except Exception:
+            pass
+    if os.environ.get("DISPLAY"):
+        try:
+            cmd = [
+                sys.executable,
+                "-c",
+                "import tkinter as tk; from tkinter import filedialog; root = tk.Tk(); root.withdraw(); "
+                "path = filedialog.askdirectory(title='Select Java BlockStore Folder'); print(path if path else '')",
+            ]
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            if res.returncode == 0 and res.stdout.strip():
+                return res.stdout.strip()
+        except Exception:
+            pass
+    return None
 
 
 def iter_any_envelopes(data: bytes) -> list[EventRecord]:
@@ -290,8 +341,8 @@ def get_java_retriever(fixture_paths: tuple[str, ...]) -> ThreadSafeWrapper[Java
     show_spinner="Connecting to active Java BlockStore...",
 )
 def get_java_retriever_for_store(store_path: str) -> ThreadSafeWrapper[JavaRetriever]:
-    """Connect JavaRetriever directly to an existing .dat BlockStore."""
-    retriever = JavaRetriever(store_path)
+    """Connect JavaRetriever directly to an existing or external unseen .dat BlockStore."""
+    retriever = JavaRetriever.for_external_store(store_path)
     return ThreadSafeWrapper(retriever)
 
 
@@ -1041,13 +1092,16 @@ def main() -> None:
         st.header("📦 Storage & Data Source")
 
         if "pending_source_mode" in st.session_state:
-            st.session_state["source_mode_radio"] = st.session_state.pop("pending_source_mode")
+            pending = st.session_state.pop("pending_source_mode")
+            if pending == "Existing Java BlockStore (.dat)":
+                pending = "Open Java BlockStore (.dat / Folder)"
+            st.session_state["source_mode_radio"] = pending
 
         source_modes = [
             "Upload Custom Binary (.bin / .fss.bin)",
             "Auto-Simulate Unseen Pipeline (Live)",
             "Golden Fixtures (fixtures/golden)",
-            "Existing Java BlockStore (.dat)",
+            "Open Java BlockStore (.dat / Folder)",
             "Java Telemetry Storage (IPC Engine)",
         ]
 
@@ -1131,35 +1185,95 @@ def main() -> None:
             else:
                 st.warning("No fixtures found in fixtures/golden/")
 
-        elif source_mode == "Existing Java BlockStore (.dat)":
+        elif source_mode in ("Open Java BlockStore (.dat / Folder)", "Existing Java BlockStore (.dat)"):
             if st.session_state.get("active_workspace") == "Auto-Simulator":
                 st.session_state["active_workspace"] = "Diagnostics MVP"
 
-            active_sim_store = st.session_state.get("active_store_path")
-            all_dat_options = list(dat_files)
-            if active_sim_store and Path(active_sim_store).exists():
-                sim_name = Path(active_sim_store).name
-                if sim_name not in all_dat_options:
-                    all_dat_options.insert(0, sim_name)
+            st.markdown("#### 📂 External Unseen Store Input")
 
-            if all_dat_options:
-                default_dat_idx = 0
-                if active_sim_store and Path(active_sim_store).name in all_dat_options:
-                    default_dat_idx = all_dat_options.index(Path(active_sim_store).name)
-                selected_dat = st.selectbox("Select BlockStore File", all_dat_options, index=default_dat_idx)
-                if active_sim_store and selected_dat == Path(active_sim_store).name:
-                    chosen_store = Path(active_sim_store)
+            # Option A: Browse or Enter External Folder / File
+            c_browse, c_clear = st.columns([3, 1])
+            with c_browse:
+                if st.button("📁 Browse External Storage Folder...", use_container_width=True, help="Launch native system dialog to pick an external directory."):
+                    picked = pick_directory_native()
+                    if picked:
+                        st.session_state["external_store_input"] = picked
+                        st.rerun()
+                    else:
+                        st.info("Directly paste your external path in the text field below.")
+            with c_clear:
+                if st.button("Clear", use_container_width=True):
+                    st.session_state.pop("external_store_input", None)
+                    st.rerun()
+
+            ext_input = st.text_input(
+                "External Storage Folder / .dat Path",
+                value=st.session_state.get("external_store_input", ""),
+                placeholder="/absolute/path/to/external_unseen_store or /path/to/file.dat",
+                help="Specify an external Java storage folder (with blocks.dat and block-metadata.dat or segments/) or standalone .dat file outside the repo.",
+            )
+            if ext_input != st.session_state.get("external_store_input", ""):
+                st.session_state["external_store_input"] = ext_input
+
+            # Option B: Upload .dat or .zip bundle
+            st.markdown("<div style='font-size:0.75rem; color:#8E9E99; margin-top:0.4rem;'>OR UPLOAD UNSEEN STORE ARCHIVE:</div>", unsafe_allow_html=True)
+            uploaded_store = st.file_uploader(
+                "Upload Store (.dat / .zip)",
+                type=["dat", "zip"],
+                help="Accepts standalone .dat BlockStore files or .zip archives of a segmented store folder. Staged in isolated OS temp path.",
+            )
+
+            # Stage 2 Execution Toggle
+            auto_run_stage2 = st.toggle(
+                "Auto-run RAG & Synthesis after Java Retrieval",
+                value=st.session_state.get("auto_run_stage2", True),
+                help="When ON, runs Stage 1 (Java retrieval) then immediately Stage 2 (RAG & Synthesis). When OFF, pauses after Stage 1 so you can inspect the Java Receipt.",
+            )
+            st.session_state["auto_run_stage2"] = auto_run_stage2
+
+            active_sim_store = st.session_state.get("active_store_path")
+            target_path: Path | None = None
+
+            if uploaded_store is not None:
+                if uploaded_store.name.endswith(".zip"):
+                    try:
+                        target_path = extract_unseen_zip(uploaded_store.getvalue(), filename=uploaded_store.name)
+                        st.caption(f"📦 Extracted Unseen Store: `{uploaded_store.name}`")
+                    except Exception as ex:
+                        st.error(f"Failed to extract zip archive: {ex}")
                 else:
-                    chosen_store = BRIDGE_DIR / selected_dat
-                active_filename = selected_dat
-                st.caption(f"📁 Active BlockStore: `{selected_dat}`")
-                if st.session_state.get("active_bin_path") and Path(st.session_state["active_bin_path"]).exists():
-                    active_bin = Path(st.session_state["active_bin_path"])
-                    chosen_fixtures = [active_bin]
-                    raw_bytes_sample = active_bin.read_bytes()[:4096]
-                    file_sha256 = compute_sha256(active_bin)
+                    target_path = stage_unseen_dat(uploaded_store.getvalue(), filename=uploaded_store.name)
+                    st.caption(f"📦 Staged Standalone .dat: `{uploaded_store.name}`")
+            elif ext_input.strip():
+                candidate = Path(ext_input.strip()).resolve()
+                if candidate.exists():
+                    target_path = candidate
+                else:
+                    st.error(f"Path does not exist: `{candidate}`")
+            elif active_sim_store and Path(active_sim_store).exists():
+                target_path = Path(active_sim_store)
+                st.caption(f"📁 Active Unseen Simulator Store: `{target_path.name}`")
+            elif dat_files:
+                selected_dat = st.selectbox("Or Select Existing Local Store", dat_files, index=0)
+                target_path = BRIDGE_DIR / selected_dat
+
+            if target_path is not None and target_path.exists():
+                layout = detect_java_store_layout(target_path)
+                if layout.is_valid:
+                    chosen_store = target_path
+                    active_filename = target_path.name
+                    st.caption(f"✅ Verified Layout: **{layout.layout_type}** ({layout.segment_count} segments)")
+                else:
+                    st.error(f"Store Layout Error: {layout.error_message}")
+                    chosen_store = None
             else:
-                st.warning("No .dat BlockStore files found in bridge/")
+                chosen_store = None
+
+            if st.session_state.get("active_bin_path") and Path(st.session_state["active_bin_path"]).exists():
+                active_bin = Path(st.session_state["active_bin_path"])
+                chosen_fixtures = [active_bin]
+                raw_bytes_sample = active_bin.read_bytes()[:4096]
+                file_sha256 = compute_sha256(active_bin)
 
         elif source_mode == "Java Telemetry Storage (IPC Engine)":
             if st.session_state.get("active_workspace") == "Auto-Simulator":
@@ -1229,6 +1343,17 @@ def main() -> None:
                         sample_envelopes.extend(iter_any_envelopes(p.read_bytes()))
                     except Exception:
                         pass
+            if not sample_envelopes:
+                try:
+                    with retriever_wrapper as ret:
+                        probe_env = ret.retrieve_envelope(ALL, 0, UINT64_MAX if ret.mode == "storage_ipc" else 1000, max_events=100)
+                        if probe_env.events:
+                            sample_envelopes = [e.to_event_record() for e in probe_env.events]
+                        elif probe_env.min_ts_ns and probe_env.max_ts_ns:
+                            t_min = probe_env.min_ts_ns
+                            t_max = probe_env.max_ts_ns
+                except Exception:
+                    pass
         elif chosen_fixtures:
             fixture_strs = tuple(str(p.resolve()) for p in chosen_fixtures)
             retriever_wrapper = get_java_retriever(fixture_strs)
@@ -1479,12 +1604,19 @@ def main() -> None:
     st.markdown("<div style='margin-bottom: 14px;'></div>", unsafe_allow_html=True)
 
     # =========================================================================
-    # RETRIEVAL EXECUTION: Full Dataset vs Bounded Slicing
+    # STAGE 1: Java Storage & Bounded Retrieval (Java Layer Only)
     # =========================================================================
     retrieval_res: RetrievalResult
     condensed_events: list[dict[str, Any]] = []
+    receipt: JavaReceipt | None = None
 
-    with st.spinner("Executing Java BlockStore retrieval & telemetry condensation..."):
+    stage1_box = st.status("Step 1: Java Storage & Bounded Retrieval (Java Layer Only)...", expanded=True)
+    with stage1_box:
+        st.markdown(
+            "⏳ *Executing Java-only storage reading & bounded retrieval over IPC...* "
+            "<span class='fss-status-pill online' style='font-size:0.7rem;'>ISOLATED FROM RAG</span>",
+            unsafe_allow_html=True,
+        )
         try:
             with retriever_wrapper as retriever:
                 if analysis_scope.startswith("Full"):
@@ -1535,12 +1667,70 @@ def main() -> None:
                     t_start_effective = t_start_ns
                     t_end_effective = t_end_ns
 
+                receipt = getattr(retrieval_res, "receipt", None) or retriever.get_last_receipt()
+
+            stage1_box.update(
+                label=f"Step 1 Complete: Java Retrieval Verified ({len(retrieval_res.events):,} records returned)",
+                state="complete",
+                expanded=False,
+            )
         except RetrievalRequestError as exc:
+            stage1_box.update(label=f"Step 1 Failed: Contract Violation ({exc})", state="error")
             st.error(f"Retrieval Request Contract Violation: {exc}")
             st.stop()
         except Exception as exc:
+            stage1_box.update(label=f"Step 1 Failed: Java Error ({exc})", state="error")
             st.error(f"JavaStoreBridge Retrieval Failure: {exc}")
             st.stop()
+
+    # Display Java Retrieval Receipt Card
+    if receipt is not None:
+        rec_html = f"""
+        <div class="fss-card" style="margin-bottom: 1rem;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 0.6rem;">
+                <span style="font-family:'IBM Plex Mono',monospace; font-weight:600; font-size:0.86rem; color:var(--text); letter-spacing:0.04em;">
+                    JAVA RETRIEVAL RECEIPT // STAGE 1 VERIFIED
+                </span>
+                <span class="fss-status-pill online">UNSEEN STORE · ISOLATED FROM RAG</span>
+            </div>
+            <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0.65rem; font-family:'IBM Plex Mono',monospace; font-size:0.82rem;">
+                <div><span style="color:var(--muted);">Java Engine:</span> <code>{html.escape(receipt.java_engine)}</code></div>
+                <div><span style="color:var(--muted);">Layout:</span> <code>{html.escape(receipt.store_layout)}</code></div>
+                <div><span style="color:var(--muted);">Events Returned:</span> <code>{receipt.events_returned:,}</code></div>
+                <div><span style="color:var(--muted);">IPC Latency:</span> <code>{receipt.java_ipc_latency_ms:.2f} ms</code></div>
+                <div><span style="color:var(--muted);">Timestamp Span:</span> <code>[{receipt.min_ts_ns} .. {receipt.max_ts_ns}] ns</code></div>
+                <div><span style="color:var(--muted);">Trace ID:</span> <code>{html.escape(receipt.trace_id[:12])}</code></div>
+            </div>
+            <div style="font-size:0.75rem; color:var(--muted); margin-top:0.45rem; font-family:'IBM Plex Mono',monospace;">
+                External Source Path: <code>{html.escape(receipt.external_path)}</code>
+            </div>
+        </div>
+        """
+        st.markdown(rec_html, unsafe_allow_html=True)
+
+    # Short-circuit Stage 2 if zero records returned
+    if len(retrieval_res.events) == 0:
+        st.warning(
+            f"Zero telemetry events were recorded or retrieved by Java within the requested window "
+            f"[{fmt_ns(t_start_effective)}, {fmt_ns(t_end_effective)}) UTC. "
+            f"Stage 2 (RAG & Synthesis) short-circuited to prevent hallucination."
+        )
+        st.stop()
+
+    # Check pause toggle if operator requested inspection pause
+    auto_run_stage2 = st.session_state.get("auto_run_stage2", True)
+    if not auto_run_stage2:
+        col_msg, col_btn = st.columns([4, 2])
+        with col_msg:
+            st.info("Stage 1 verified. Inspect Java receipt above. Click button to proceed with Stage 2 RAG & Qwen synthesis.")
+        with col_btn:
+            run_s2 = st.button("⚡ Run Stage 2: RAG & Synthesis on Java Output", type="primary", use_container_width=True)
+        if not run_s2:
+            st.stop()
+
+    # =========================================================================
+    # STAGE 2: Python Decoding -> Vendor Manual RAG -> Synthesis Output
+    # =========================================================================
 
     # Build Grounded Evidence
     evidence = build_evidence(condensed_events, query=query, retrieval=retrieval_res)
