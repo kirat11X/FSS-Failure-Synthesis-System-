@@ -33,8 +33,9 @@ def test_sidebar_has_exactly_four_clean_source_modes():
     assert source_mode_radio is not None, "Source Mode radio not found in AppTest!"
     expected_modes = [
         "Upload Custom Binary (.bin / .fss.bin)",
+        "Auto-Simulate Unseen Pipeline (Live)",
         "Golden Fixtures (fixtures/golden)",
-        "Existing Java BlockStore (.dat)",
+        "Open Java BlockStore (.dat / Folder)",
         "Java Telemetry Storage (IPC Engine)",
     ]
 

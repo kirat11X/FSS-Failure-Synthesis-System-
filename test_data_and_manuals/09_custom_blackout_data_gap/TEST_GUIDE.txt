@@ -1,0 +1,25 @@
+================================================================================
+FSS TEST GUIDE: 09_custom_blackout_data_gap
+================================================================================
+
+1. BUNDLE SUMMARY:
+   - Binary File: telemetry_42s_blackout.fss.bin (Contract v0 Little-Endian, 42s unrecorded gap)
+   - Manual File: aerodrone_inc_manual.md (Markdown format, AeroDrone Inc. manual)
+   - Domain: D1 Drones / Stage 0 Sufficiency Gate Test
+
+2. STEP-BY-STEP UI VERIFICATION INSTRUCTIONS:
+   a. Open http://127.0.0.1:8501.
+   b. In sidebar under 'Storage & Data Source', select 'Upload Custom Binary (.bin / .fss.bin)'.
+   c. Upload 'telemetry_42s_blackout.fss.bin'.
+   d. In 'Domain / Error Manual', upload 'aerodrone_inc_manual.md'.
+   e. Set 'Analysis Scope' to 'FULL DATASET (All Events)'.
+   f. Enter the query below and execute synthesis.
+
+3. SUGGESTED UI QUERY:
+   "Synthesize the incident cause and assess telemetry completeness across the crash timeline."
+
+4. EXPECTED OUTPUT & VALIDATION BADGES:
+   - Stage 0 Sufficiency Gate: Triggers INSUFFICIENT_EVIDENCE / Data Gaps Quarantine.
+   - Refusal to Hallucinate: Explicitly warns that 42 seconds of telemetry are completely missing between nominal flight and crash, refusing to fabricate root cause.
+   - Validation Verdict: INSUFFICIENT_EVIDENCE (Hard Rule 06 compliance).
+================================================================================

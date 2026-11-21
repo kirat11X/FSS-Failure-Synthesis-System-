@@ -548,24 +548,37 @@ def parse_error_manual(content: str | bytes, filename: str, vendor: str = "auto"
 def load_builtin_manual(vendor_name: str = "auto") -> list[VendorErrorEntry]:
     """Load built-in technical reference manuals from domain_manuals/.
 
-    Supported vendor_name options: 'ardupilot', 'px4', 'fss_native' (or 'fss'), 'auto'.
-    If 'auto' is passed, all available built-in manuals are loaded and consolidated.
+    Supported vendor_name options: 'ardupilot', 'px4', 'fss_native' (or 'fss', 'drone'),
+    'microservices', 'industrial_plc', 'can_bus' (or 'can'), 'warehouse_robots' (or 'agv'),
+    'loghub', 'financial_fix', 'all', 'auto'.
+    If 'auto' or 'all' is passed, all available built-in manuals are loaded and consolidated.
     """
     v_norm = (vendor_name or "auto").strip().lower()
-    manual_files: list[Path] = []
+    manual_files: list[tuple[Path, str]] = []
 
     if v_norm in ("ardupilot", "all", "auto"):
-        manual_files.append(MANUALS_DIR / "ardupilot_error_codes.md")
+        manual_files.append((MANUALS_DIR / "ardupilot_error_codes.md", "ardupilot"))
     if v_norm in ("px4", "all", "auto"):
-        manual_files.append(MANUALS_DIR / "px4_error_codes.md")
-    if v_norm in ("fss_native", "fss", "all", "auto"):
-        manual_files.append(MANUALS_DIR / "fss_custom_telemetry_codes.md")
+        manual_files.append((MANUALS_DIR / "px4_error_codes.md", "px4"))
+    if v_norm in ("fss_native", "fss", "drone", "all", "auto"):
+        manual_files.append((MANUALS_DIR / "fss_custom_telemetry_codes.md", "fss_native"))
+    if v_norm in ("microservices", "all", "auto"):
+        manual_files.append((MANUALS_DIR / "microservices_error_codes.md", "microservices"))
+    if v_norm in ("industrial_plc", "plc", "all", "auto"):
+        manual_files.append((MANUALS_DIR / "industrial_plc_error_codes.md", "industrial_plc"))
+    if v_norm in ("can_bus", "can", "autonomous_vehicle", "all", "auto"):
+        manual_files.append((MANUALS_DIR / "can_bus_error_codes.md", "can_bus"))
+    if v_norm in ("warehouse_robots", "warehouse", "robots", "agv", "all", "auto"):
+        manual_files.append((MANUALS_DIR / "warehouse_robots_error_codes.md", "warehouse_robots"))
+    if v_norm in ("loghub", "distributed", "all", "auto"):
+        manual_files.append((MANUALS_DIR / "loghub_error_codes.md", "loghub"))
+    if v_norm in ("financial_fix", "fix", "financial", "all", "auto"):
+        manual_files.append((MANUALS_DIR / "financial_fix_error_codes.md", "financial_fix"))
 
     entries: list[VendorErrorEntry] = []
-    for mpath in manual_files:
+    for mpath, vendor in manual_files:
         if mpath.exists():
             content = mpath.read_text(encoding="utf-8")
-            vendor = "ardupilot" if "ardupilot" in mpath.name else ("px4" if "px4" in mpath.name else "fss_native")
             parsed = parse_error_manual(content, mpath.name, vendor=vendor)
             entries.extend(parsed)
 

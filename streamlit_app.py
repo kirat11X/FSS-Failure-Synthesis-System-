@@ -24,11 +24,15 @@ import hashlib
 import html
 import json
 import os
+import random
 import re
+import shutil
 import struct
+import subprocess
 import sys
 import tempfile
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Generic, TypeVar
@@ -55,6 +59,12 @@ from fss_py.model import ALL, EventRecord, RetrievalRequest, RetrievalRequestErr
 from fss_py.schema import load_schema_file
 from fss_py.wire import iter_envelopes
 
+from bridge.auto_unseen_simulator import (
+    DOMAIN_CONFIGS,
+    SUPPORTED_DOMAINS,
+    GroundTruthManifest,
+    run_auto_unseen_pipeline,
+)
 from bridge.bin_ingestor import (
     BinCacheManager,
     compute_sha256,
@@ -72,7 +82,16 @@ from bridge.hybrid_rag import (
     HybridRetriever,
     enrich_evidence_with_manual,
 )
-from bridge.java_retriever import JavaRetriever
+from bridge.java_retriever import (
+    JavaReceipt,
+    JavaRetriever,
+    JavaStoreLayout,
+    StoreBounds,
+    detect_java_store_layout,
+    extract_unseen_zip,
+    plan_bounded_retrieval_slices,
+    stage_unseen_dat,
+)
 # Prevent CPU-only HuggingFace hangs in Streamlit interactive sessions when CUDA is absent or in tests
 try:
     if "PYTEST_CURRENT_TEST" in os.environ or "FORCE_LOCAL_HF" not in os.environ:
@@ -120,6 +139,48 @@ def detect_binary_format(data: bytes) -> tuple[str, str]:
         except Exception:
             pass
     return "BINARY ENVELOPE", "auto"
+
+
+def pick_directory_native() -> str | None:
+    """Prompt the operator with a native OS folder dialog using zenity, kdialog, or tkinter."""
+    if shutil.which("zenity"):
+        try:
+            res = subprocess.run(
+                ["zenity", "--file-selection", "--directory", "--title=Select Java BlockStore Folder"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                return res.stdout.strip()
+        except Exception:
+            pass
+    if shutil.which("kdialog"):
+        try:
+            res = subprocess.run(
+                ["kdialog", "--getexistingdirectory", "--title", "Select Java BlockStore Folder"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                return res.stdout.strip()
+        except Exception:
+            pass
+    if os.environ.get("DISPLAY"):
+        try:
+            cmd = [
+                sys.executable,
+                "-c",
+                "import tkinter as tk; from tkinter import filedialog; root = tk.Tk(); root.withdraw(); "
+                "path = filedialog.askdirectory(title='Select Java BlockStore Folder'); print(path if path else '')",
+            ]
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            if res.returncode == 0 and res.stdout.strip():
+                return res.stdout.strip()
+        except Exception:
+            pass
+    return None
 
 
 def iter_any_envelopes(data: bytes) -> list[EventRecord]:
@@ -282,8 +343,8 @@ def get_java_retriever(fixture_paths: tuple[str, ...]) -> ThreadSafeWrapper[Java
     show_spinner="Connecting to active Java BlockStore...",
 )
 def get_java_retriever_for_store(store_path: str) -> ThreadSafeWrapper[JavaRetriever]:
-    """Connect JavaRetriever directly to an existing .dat BlockStore."""
-    retriever = JavaRetriever(store_path)
+    """Connect JavaRetriever directly to an existing or external unseen .dat BlockStore."""
+    retriever = JavaRetriever.for_external_store(store_path)
     return ThreadSafeWrapper(retriever)
 
 
@@ -305,9 +366,10 @@ def get_local_llm_engine() -> ThreadSafeWrapper[LocalLLMEngine]:
 
 
 @st.cache_resource
-def get_schema_registry():
+def get_schema_registry(schema_path: str | Path | None = None):
     """Load and cache the schema registry."""
-    return load_schema_file(SCHEMA_PATH)
+    p = Path(schema_path) if schema_path else SCHEMA_PATH
+    return load_schema_file(p)
 
 
 @st.cache_resource
@@ -329,6 +391,7 @@ def cached_execute_retrieval(
     t_end_ns: int,
     max_events: int,
     _retriever: JavaRetriever,
+    trace_id: str | None = None,
 ) -> RetrievalResult:
     """Cache immutable BlockStore retrieval results."""
     source_arg = ALL if source_str == "ALL" else int(source_str)
@@ -337,6 +400,7 @@ def cached_execute_retrieval(
         t_start_ns=t_start_ns,
         t_end_ns=t_end_ns,
         max_events=max_events,
+        trace_id=trace_id,
     )
 
 
@@ -642,13 +706,13 @@ def _render_masthead(model_status: dict[str, Any], trace_id: str) -> None:
     )
     # Render an invisible title element so AppTest at.title captures it without double-rendering visually
     st.markdown('<div class="fss-sr-only">', unsafe_allow_html=True)
-    st.title("Failure Synthesis System // Telemetry Diagnostics Terminal")
+    st.title("FSS - Failure Synthesis System")
     st.markdown('</div>', unsafe_allow_html=True)
 
     header_html = (
         f'<div class="fss-masthead">'
         f'<div>'
-        f'<div class="fss-title">FSS // TELEMETRY DIAGNOSTICS TERMINAL</div>'
+        f'<div class="fss-title">FSS - Failure Synthesis System</div>'
         f'<div class="fss-subtitle">Java 64KB BlockStore · Contract v0 · Hybrid RAG · 4-Tier Epistemic Auditor</div>'
         f'</div>'
         f'<div style="display:flex;gap:0.5rem;align-items:center;">'
@@ -763,6 +827,240 @@ def _render_verdict_and_synthesis(
                 for note in skew_info["lamport_order_notes"]:
                     st.caption(f"• {note}")
 
+    # Ground Truth Blind Evaluation Comparison (Hidden Simulator Manifest)
+    sim_gt = st.session_state.get("sim_ground_truth")
+    if sim_gt is not None:
+        gt_dict = sim_gt.to_dict() if hasattr(sim_gt, "to_dict") else sim_gt
+        with st.expander("Compare Against Hidden Simulator Ground Truth (Blind Eval)", expanded=False):
+            c_gt1, c_gt2, c_gt3 = st.columns(3)
+            with c_gt1:
+                st.markdown(f"**Domain:** `{gt_dict.get('domain')}`")
+                st.markdown(f"**Random Seed:** `{gt_dict.get('seed')}`")
+                st.markdown(f"**Total Events:** `{gt_dict.get('total_events')}`")
+            with c_gt2:
+                st.markdown(f"**Injected Root Cause:** Source `{gt_dict.get('injected_root_cause_source')}`")
+                st.markdown(f"**Root Event:** `{gt_dict.get('injected_root_event_name')}` (`0x{gt_dict.get('injected_root_event_type', 0):04X}`)")
+                st.markdown(f"**Injected Symptom:** Source `{gt_dict.get('injected_symptom_source')}` (`{gt_dict.get('injected_symptom_event_name')}`)")
+            with c_gt3:
+                st.markdown(f"**Pipeline Verdict:** `{badge}`")
+                st.markdown(f"**Clock Skew Injected:** `{gt_dict.get('clock_skew_ms', 0):.1f} ms`")
+                st.markdown(f"**Crash Tail Quarantined:** `{'Yes' if gt_dict.get('crash_tail') else 'No'}`")
+
+            gaps = gt_dict.get("injected_gaps", [])
+            if gaps:
+                st.markdown("**Injected Edge-Cases & Gaps:**")
+                for g in gaps:
+                    st.markdown(f"- `{g}`")
+
+
+# -----------------------------------------------------------------------------
+# Auto-Unseen Telemetry Simulator Workspace
+# -----------------------------------------------------------------------------
+
+
+def _render_sim_table(placeholder: Any, rows: list[dict[str, Any]]) -> None:
+    """Render tabular data cleanly as Markdown table without pandas C-extension dependencies."""
+    if not rows:
+        placeholder.empty()
+        return
+    cols = list(rows[0].keys())
+    lines = [
+        "| " + " | ".join(cols) + " |",
+        "| " + " | ".join(["---"] * len(cols)) + " |",
+    ]
+    for r in rows:
+        lines.append("| " + " | ".join(str(r.get(c, "")).replace("|", "\\|") for c in cols) + " |")
+    placeholder.markdown("\n".join(lines))
+
+
+def render_auto_simulator_view() -> None:
+    """Render the Live Auto-Unseen Telemetry Simulator Workspace."""
+    # Screen-reader title for accessibility tests
+    st.markdown('<div class="fss-sr-only">', unsafe_allow_html=True)
+    st.title("FSS - Failure Synthesis System")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    header_html = (
+        f'<div class="fss-masthead">'
+        f'<div>'
+        f'<div class="fss-title">FSS // AUTO-UNSEEN TELEMETRY SIMULATOR</div>'
+        f'<div class="fss-subtitle">On-the-Fly Contract v0 Synthesis · Java 64KB BlockStore · Multi-Domain Chaos Engine</div>'
+        f'</div>'
+        f'<div style="display:flex;gap:0.5rem;align-items:center;">'
+        f'<span class="fss-badge ok">READY TO FORGE</span>'
+        f'</div>'
+        f'</div>'
+    )
+    st.markdown(header_html, unsafe_allow_html=True)
+
+    # Simulator Configuration Card
+    with st.container():
+        st.markdown('<div class="fss-card">', unsafe_allow_html=True)
+        st.markdown('<div class="fss-card-title">SIMULATOR CONFIGURATION & DOMAIN PARAMETERS</div>', unsafe_allow_html=True)
+
+        col_d, col_c, col_s = st.columns([2, 1.2, 1.8])
+        with col_d:
+            domain_choice = st.selectbox(
+                "Telemetry Domain",
+                ["Random Domain"] + SUPPORTED_DOMAINS,
+                index=0,
+                help="Select target domain schema and vendor error manual, or choose Random Domain for dynamic discovery.",
+            )
+        with col_c:
+            event_count = st.slider(
+                "Burst Event Count",
+                min_value=20,
+                max_value=200,
+                value=80,
+                step=10,
+                help="Burst size of Contract v0 binary envelopes to synthesize.",
+            )
+        with col_s:
+            st.session_state.setdefault("sim_random_seed", random.randint(100_000, 999_999))
+            c_seed_val, c_seed_btn = st.columns([2, 1])
+            with c_seed_val:
+                seed_val = st.number_input(
+                    "Random Seed",
+                    value=int(st.session_state["sim_random_seed"]),
+                    step=1,
+                    help="Random seed for reproducible unseen scenario generation.",
+                )
+            with c_seed_btn:
+                st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+                if st.button("🎲 New Seed", use_container_width=True):
+                    st.session_state["sim_random_seed"] = random.randint(100_000, 999_999)
+                    st.rerun()
+
+        st.markdown('<div style="margin-top: 0.5rem; margin-bottom: 0.25rem; font-family: monospace; font-size: 0.78rem; color: #8E9E99;">CHAOS & ADVERSARIAL EDGE-CASE INJECTORS:</div>', unsafe_allow_html=True)
+        c_ch1, c_ch2, c_ch3 = st.columns(3)
+        with c_ch1:
+            cross_cascade = st.checkbox("Cross-Source Cascade", value=True, help="Inject root-cause fault on Source A that triggers downstream symptom on Source B.")
+            clock_skew = st.checkbox("Inject Clock Skew", value=False, help="Shift Source B producer timestamps backward by 80-250ms relative to Source A.")
+        with c_ch2:
+            opaque_bytes = st.checkbox("Opaque Trailing Bytes", value=False, help="Append 8 unconfigured trailing bytes to diagnostic events (PARTIALLY_DECODED).")
+            blackout_gap = st.checkbox("Telemetry Blackout Gap", value=False, help="Insert 35-60s unrecorded blackout covering fault window (triggers INSUFFICIENT_EVIDENCE).")
+        with c_ch3:
+            unknown_etype = st.checkbox("Unknown Event Type", value=False, help="Insert unconfigured event type 0x007F to prove UNKNOWN_EVENT_TYPE quarantine.")
+            crash_tail = st.checkbox("Mid-Write Crash Tail", value=False, help="Append incomplete trailing header at EOF to prove Java crash recovery.")
+
+        auto_switch_mvp = st.checkbox(
+            "Auto-Switch & Run Full MVP Analysis",
+            value=True,
+            help="Automatically transition to Diagnostics MVP and execute Java Retrieval -> Decoding -> RAG -> Sufficiency Gate -> Synthesis -> Citation Audit.",
+        )
+
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    # Primary Action Button
+    st.markdown("<div style='margin-top: 0.5rem;'></div>", unsafe_allow_html=True)
+    start_sim = st.button("⚡ Generate Unseen Data & Run Full Pipeline", type="primary", use_container_width=True)
+
+    if start_sim:
+        st.session_state["sim_random_seed"] = int(seed_val)
+        status_box = st.status("Initializing unseen telemetry forge...", expanded=True)
+
+        metric_placeholder = status_box.empty()
+        table_placeholder = status_box.empty()
+        block_placeholder = status_box.empty()
+
+        handoff_data: dict[str, Any] | None = None
+
+        for update in run_auto_unseen_pipeline(
+            domain=domain_choice,
+            seed=int(seed_val),
+            event_count=int(event_count),
+            cross_source_cascade=cross_cascade,
+            inject_opaque_bytes=opaque_bytes,
+            inject_unknown_event_type=unknown_etype,
+            inject_clock_skew=clock_skew,
+            inject_blackout_gap=blackout_gap,
+            inject_crash_tail=crash_tail,
+        ):
+            stage = update.get("stage")
+            msg = update.get("message", "")
+
+            if stage == "STAGE_1_GENERATE":
+                status_box.update(label=f"Stage 1: {msg}", state="running")
+                metric_placeholder.markdown(
+                    f"**Generated:** `{update.get('events_count')}/{update.get('total_events')}` events · "
+                    f"**Running Wire Size:** `{update.get('running_bytes', 0):,}` bytes · "
+                    f"**Domain:** `{update.get('domain')}`"
+                )
+                previews = update.get("events_preview", [])
+                if previews:
+                    _render_sim_table(
+                        table_placeholder,
+                        [
+                            {
+                                "#": p["index"],
+                                "Source ID": p["source_id"],
+                                "Timestamp (UTC)": p["iso_timestamp"],
+                                "Event Type": p["event_type_hex"],
+                                "Payload Len": p["payload_len"],
+                                "Header Hex": p["header_hex"],
+                                "Status": p["preview"],
+                            }
+                            for p in previews
+                        ],
+                    )
+
+            elif stage == "STAGE_2_JAVA_INGEST":
+                status_box.update(label=f"Stage 2: {msg}", state="running")
+                ingest_ms = update.get("ingest_ms")
+                if ingest_ms is not None:
+                    metric_placeholder.markdown(
+                        f"**Java BlockStore Ingest:** `{ingest_ms:.2f} ms` · "
+                        f"**Target Store:** `{update.get('store_path')}`"
+                    )
+
+            elif stage == "STAGE_3_BLOCKSTORE_PERSIST":
+                status_box.update(label=f"Stage 3: {msg}", state="running")
+                blocks = update.get("blocks", [])
+                if blocks:
+                    block_placeholder.markdown("**Java 64KB Block Allocation & CRC-32C Framing:**")
+                    _render_sim_table(
+                        table_placeholder,
+                        [
+                            {
+                                "Block #": b["block_index"],
+                                "Source ID": b["source_id"],
+                                "Used Bytes": f"{b['used_bytes']} B",
+                                "Zero-Padded": f"{b['padded_bytes']} B",
+                                "Records": b["records"],
+                                "CRC-32C Status": b["crc_status"],
+                            }
+                            for b in blocks
+                        ],
+                    )
+
+            elif stage == "STAGE_4_HANDOFF":
+                handoff_data = update
+                status_box.update(label=f"Stage 4: Handoff Ready — {update.get('domain')} scenario complete!", state="complete")
+
+        if handoff_data is not None:
+            # Populate session state for immediate Diagnostics MVP execution
+            st.session_state["active_store_path"] = str(handoff_data["store_path"])
+            st.session_state["active_bin_path"] = str(handoff_data["bin_path"])
+            st.session_state["active_schema_path"] = str(handoff_data["schema_path"])
+            st.session_state["active_manual_profile"] = handoff_data["matched_manual_profile"]
+            st.session_state["operator_query"] = handoff_data["blind_query"]
+            st.session_state["sim_ground_truth"] = handoff_data["ground_truth"]
+            st.session_state["sim_active_filename"] = Path(handoff_data["store_path"]).name
+
+            if auto_switch_mvp:
+                st.session_state["auto_run_mvp_analysis"] = True
+                st.session_state["active_workspace"] = "Diagnostics MVP"
+                st.session_state["pending_source_mode"] = "Existing Java BlockStore (.dat)"
+                time.sleep(0.5)
+                st.rerun()
+            else:
+                st.success("Scenario generation and persistence complete. Ready to switch to Diagnostics MVP.")
+                if st.button("➡️ Switch to Diagnostics MVP & Analyze Now", use_container_width=True):
+                    st.session_state["auto_run_mvp_analysis"] = True
+                    st.session_state["active_workspace"] = "Diagnostics MVP"
+                    st.session_state["pending_source_mode"] = "Existing Java BlockStore (.dat)"
+                    st.rerun()
+
 
 # -----------------------------------------------------------------------------
 # Main Application Entry Point
@@ -771,7 +1069,7 @@ def _render_verdict_and_synthesis(
 
 def main() -> None:
     st.set_page_config(
-        page_title="Failure Synthesis System (FSS) — Telemetry Diagnostics Terminal",
+        page_title="FSS - Failure Synthesis System",
         page_icon="📟",
         layout="wide",
         initial_sidebar_state="expanded",
@@ -783,10 +1081,9 @@ def main() -> None:
 
     # Single source of truth for model status
     model_status = probe_local_model_once()
-    trace_id = hashlib.sha256(f"{os.getpid()}-{datetime.now().isoformat()}".encode()).hexdigest()[:32]
-
-    # Render Single Masthead at top
-    _render_masthead(model_status, trace_id)
+    if "trace_id" not in st.session_state:
+        st.session_state["trace_id"] = hashlib.sha256(f"{os.getpid()}-{datetime.now().isoformat()}".encode()).hexdigest()[:32]
+    trace_id = st.session_state["trace_id"]
 
     cache_mgr = get_bin_cache_manager()
 
@@ -800,17 +1097,35 @@ def main() -> None:
     with st.sidebar:
         st.header("📦 Storage & Data Source")
 
-        source_mode = st.radio(
-            "Source Mode",
-            [
-                "Upload Custom Binary (.bin / .fss.bin)",
-                "Golden Fixtures (fixtures/golden)",
-                "Existing Java BlockStore (.dat)",
-                "Java Telemetry Storage (IPC Engine)",
-            ],
-            index=0,
-            help="Select telemetry input source: upload custom .bin/.fss.bin files directly, inspect reference golden fixtures, open persisted Java BlockStore files (.dat), or query live Java IPC storage.",
-        )
+        if "pending_source_mode" in st.session_state:
+            pending = st.session_state.pop("pending_source_mode")
+            if pending == "Existing Java BlockStore (.dat)":
+                pending = "Open Java BlockStore (.dat / Folder)"
+            st.session_state["source_mode_radio"] = pending
+
+        source_modes = [
+            "Upload Custom Binary (.bin / .fss.bin)",
+            "Auto-Simulate Unseen Pipeline (Live)",
+            "Golden Fixtures (fixtures/golden)",
+            "Open Java BlockStore (.dat / Folder)",
+            "Java Telemetry Storage (IPC Engine)",
+        ]
+
+        if "source_mode_radio" in st.session_state:
+            source_mode = st.radio(
+                "Source Mode",
+                source_modes,
+                key="source_mode_radio",
+                help="Select telemetry input source: upload custom .bin/.fss.bin files directly, simulate novel unseen scenarios live, inspect reference golden fixtures, open persisted Java BlockStore files (.dat), or query live Java IPC storage.",
+            )
+        else:
+            source_mode = st.radio(
+                "Source Mode",
+                source_modes,
+                index=0,
+                key="source_mode_radio",
+                help="Select telemetry input source: upload custom .bin/.fss.bin files directly, simulate novel unseen scenarios live, inspect reference golden fixtures, open persisted Java BlockStore files (.dat), or query live Java IPC storage.",
+            )
 
         chosen_fixtures: list[Path] = []
         chosen_store: Path | None = None
@@ -819,7 +1134,19 @@ def main() -> None:
         was_cached: bool = False
         file_sha256: str = ""
 
-        if source_mode == "Upload Custom Binary (.bin / .fss.bin)":
+        if source_mode == "Auto-Simulate Unseen Pipeline (Live)":
+            st.session_state["active_workspace"] = "Auto-Simulator"
+            st.info("⚡ Live telemetry generator active. Configure and forge dynamic scenarios in the main terminal.")
+
+        elif source_mode == "Upload Custom Binary (.bin / .fss.bin)":
+            if st.session_state.get("active_workspace") == "Auto-Simulator":
+                st.session_state["active_workspace"] = "Diagnostics MVP"
+            st.session_state.pop("sim_ground_truth", None)
+            st.session_state.pop("active_store_path", None)
+            st.session_state.pop("active_bin_path", None)
+            st.session_state.pop("active_schema_path", None)
+            st.session_state.pop("active_manual_profile", None)
+
             upload = st.file_uploader(
                 "Upload Telemetry Binary (.bin / .fss.bin)",
                 type=["bin"],
@@ -845,6 +1172,14 @@ def main() -> None:
                 st.info("Upload a `.bin` or `.fss.bin` file to begin.")
 
         elif source_mode == "Golden Fixtures (fixtures/golden)":
+            if st.session_state.get("active_workspace") == "Auto-Simulator":
+                st.session_state["active_workspace"] = "Diagnostics MVP"
+            st.session_state.pop("sim_ground_truth", None)
+            st.session_state.pop("active_store_path", None)
+            st.session_state.pop("active_bin_path", None)
+            st.session_state.pop("active_schema_path", None)
+            st.session_state.pop("active_manual_profile", None)
+
             if fixture_files:
                 sel_name = st.selectbox("Select Golden Fixture", fixture_files, index=0)
                 active_filename = sel_name
@@ -856,15 +1191,105 @@ def main() -> None:
             else:
                 st.warning("No fixtures found in fixtures/golden/")
 
-        elif source_mode == "Existing Java BlockStore (.dat)":
-            if dat_files:
-                selected_dat = st.selectbox("Select BlockStore File", dat_files, index=0)
-                chosen_store = BRIDGE_DIR / selected_dat
-                active_filename = selected_dat
+        elif source_mode in ("Open Java BlockStore (.dat / Folder)", "Existing Java BlockStore (.dat)"):
+            if st.session_state.get("active_workspace") == "Auto-Simulator":
+                st.session_state["active_workspace"] = "Diagnostics MVP"
+
+            st.markdown("#### 📂 External Unseen Store Input")
+
+            # Option A: Browse or Enter External Folder / File
+            c_browse, c_clear = st.columns([2.2, 1])
+            with c_browse:
+                if st.button("📁 Browse Folder", use_container_width=True, help="Launch native system dialog to pick an external directory."):
+                    picked = pick_directory_native()
+                    if picked:
+                        st.session_state["external_store_input"] = picked
+                        st.rerun()
+                    else:
+                        st.info("Directly paste your external path in the text field below.")
+            with c_clear:
+                if st.button("Clear", use_container_width=True):
+                    st.session_state.pop("external_store_input", None)
+                    st.rerun()
+
+            ext_input = st.text_input(
+                "External Storage Folder / .dat Path",
+                value=st.session_state.get("external_store_input", ""),
+                placeholder="/absolute/path/to/external_unseen_store or /path/to/file.dat",
+                help="Specify an external Java storage folder (with blocks.dat and block-metadata.dat or segments/) or standalone .dat file outside the repo.",
+            )
+            if ext_input != st.session_state.get("external_store_input", ""):
+                st.session_state["external_store_input"] = ext_input
+
+            # Option B: Upload .dat or .zip bundle
+            st.markdown("<div style='font-size:0.75rem; color:#8E9E99; margin-top:0.4rem;'>OR UPLOAD UNSEEN STORE ARCHIVE:</div>", unsafe_allow_html=True)
+            uploaded_store = st.file_uploader(
+                "Upload Store (.dat / .zip)",
+                type=["dat", "zip"],
+                help="Accepts standalone .dat BlockStore files or .zip archives of a segmented store folder. Staged in isolated OS temp path.",
+            )
+
+            # Stage 2 Execution Toggle
+            auto_run_stage2 = st.toggle(
+                "Auto-run RAG & Synthesis after Java Retrieval",
+                value=st.session_state.get("auto_run_stage2", True),
+                help="When ON, runs Stage 1 (Java retrieval) then immediately Stage 2 (RAG & Synthesis). When OFF, pauses after Stage 1 so you can inspect the Java Receipt.",
+            )
+            st.session_state["auto_run_stage2"] = auto_run_stage2
+
+            active_sim_store = st.session_state.get("active_store_path")
+            target_path: Path | None = None
+
+            if uploaded_store is not None:
+                if uploaded_store.name.endswith(".zip"):
+                    try:
+                        target_path = extract_unseen_zip(uploaded_store.getvalue(), filename=uploaded_store.name)
+                        st.caption(f"📦 Extracted Unseen Store: `{uploaded_store.name}`")
+                    except Exception as ex:
+                        st.error(f"Failed to extract zip archive: {ex}")
+                else:
+                    target_path = stage_unseen_dat(uploaded_store.getvalue(), filename=uploaded_store.name)
+                    st.caption(f"📦 Staged Standalone .dat: `{uploaded_store.name}`")
+            elif ext_input.strip():
+                candidate = Path(ext_input.strip()).resolve()
+                if candidate.exists():
+                    target_path = candidate
+                else:
+                    st.error(f"Path does not exist: `{candidate}`")
+            elif active_sim_store and Path(active_sim_store).exists():
+                target_path = Path(active_sim_store)
+                st.caption(f"📁 Active Unseen Simulator Store: `{target_path.name}`")
+            elif dat_files:
+                selected_dat = st.selectbox("Or Select Existing Local Store", dat_files, index=0)
+                target_path = BRIDGE_DIR / selected_dat
+
+            if target_path is not None and target_path.exists():
+                layout = detect_java_store_layout(target_path)
+                if layout.is_valid:
+                    chosen_store = target_path
+                    active_filename = target_path.name
+                    st.caption(f"✅ Verified Layout: **{layout.layout_type}** ({layout.segment_count} segments)")
+                else:
+                    st.error(f"Store Layout Error: {layout.error_message}")
+                    chosen_store = None
             else:
-                st.warning("No .dat BlockStore files found in bridge/")
+                chosen_store = None
+
+            if st.session_state.get("active_bin_path") and Path(st.session_state["active_bin_path"]).exists():
+                active_bin = Path(st.session_state["active_bin_path"])
+                chosen_fixtures = [active_bin]
+                raw_bytes_sample = active_bin.read_bytes()[:4096]
+                file_sha256 = compute_sha256(active_bin)
 
         elif source_mode == "Java Telemetry Storage (IPC Engine)":
+            if st.session_state.get("active_workspace") == "Auto-Simulator":
+                st.session_state["active_workspace"] = "Diagnostics MVP"
+            st.session_state.pop("sim_ground_truth", None)
+            st.session_state.pop("active_store_path", None)
+            st.session_state.pop("active_bin_path", None)
+            st.session_state.pop("active_schema_path", None)
+            st.session_state.pop("active_manual_profile", None)
+
             cat = st.selectbox(
                 "IPC Source Corpus",
                 [
@@ -896,9 +1321,20 @@ def main() -> None:
         # Detect wire format & vendor hint
         detected_fmt, vendor_hint = detect_binary_format(raw_bytes_sample)
 
+    # Workspace controller: if in Auto-Simulator, render the simulator workspace and exit immediately
+    if source_mode == "Auto-Simulate Unseen Pipeline (Live)" or st.session_state.get("active_workspace") == "Auto-Simulator":
+        render_auto_simulator_view()
+        return
+
+    # Diagnostics MVP Workspace: Render Masthead
+    _render_masthead(model_status, trace_id)
+
     # Ensure we have a valid retriever connection
     retriever_wrapper: ThreadSafeWrapper[JavaRetriever]
     sample_envelopes: list[EventRecord] = []
+    t_min: int | None = None
+    t_max: int | None = None
+    all_sources: list[int] = []
 
     try:
         if source_mode == "Java Telemetry Storage (IPC Engine)":
@@ -910,6 +1346,31 @@ def main() -> None:
                     pass
         elif chosen_store is not None and chosen_store.exists():
             retriever_wrapper = get_java_retriever_for_store(str(chosen_store))
+            if chosen_fixtures:
+                for p in chosen_fixtures:
+                    try:
+                        sample_envelopes.extend(iter_any_envelopes(p.read_bytes()))
+                    except Exception:
+                        pass
+            if not sample_envelopes:
+                try:
+                    with retriever_wrapper as ret:
+                        bounds = ret.get_store_bounds(trace_id=trace_id)
+                        if bounds.status == "OK" and bounds.min_ts_ns is not None and bounds.max_ts_ns is not None:
+                            t_min = bounds.min_ts_ns
+                            t_max = bounds.max_ts_ns
+                            all_sources = list(bounds.known_sources)
+                            slices = plan_bounded_retrieval_slices(bounds.segment_windows, t_min, t_max)
+                            if slices:
+                                s_start, s_end = slices[0]
+                                probe_end = min(s_start + 60_000_000_000, s_end)
+                                if probe_end <= s_start:
+                                    probe_end = s_start + 1
+                                probe_env = ret.retrieve_envelope(ALL, s_start, probe_end, max_events=50, trace_id=trace_id)
+                                if probe_env.events:
+                                    sample_envelopes = [e.to_event_record() for e in probe_env.events]
+                except Exception:
+                    pass
         elif chosen_fixtures:
             fixture_strs = tuple(str(p.resolve()) for p in chosen_fixtures)
             retriever_wrapper = get_java_retriever(fixture_strs)
@@ -927,17 +1388,22 @@ def main() -> None:
 
     # Compute duration & event statistics
     if sample_envelopes:
-        all_sources = sorted({e.source_id for e in sample_envelopes})
-        t_min = min(e.timestamp_ns for e in sample_envelopes)
-        t_max = max(e.timestamp_ns for e in sample_envelopes)
+        all_sources = sorted(set(all_sources).union({e.source_id for e in sample_envelopes}))
+        t_min_val = min((t_min if t_min is not None else float("inf")), min(e.timestamp_ns for e in sample_envelopes))
+        t_max_val = max((t_max if t_max is not None else float("-inf")), max(e.timestamp_ns for e in sample_envelopes))
+        t_min = int(t_min_val)
+        t_max = int(t_max_val)
         span_s = max(1, -(-(t_max - t_min + 1) // 10**9))
-        duration_display = f"{span_s}s" if span_s < 60 else f"{span_s // 60}m {span_s % 60}s"
+        duration_display = f"{span_s}s" if span_s < 60 else (f"{span_s // 60}m {span_s % 60}s" if span_s < 3600 else f"{span_s // 3600}h {(span_s % 3600) // 60}m {span_s % 60}s")
+    elif t_min is not None and t_max is not None and t_min > 0:
+        span_s = max(1, -(-(t_max - t_min + 1) // 10**9))
+        duration_display = f"{span_s}s" if span_s < 60 else (f"{span_s // 60}m {span_s % 60}s" if span_s < 3600 else f"{span_s // 3600}h {(span_s % 3600) // 60}m {span_s % 60}s")
     else:
         all_sources = []
-        t_min = 1791454020000000000
-        t_max = 1791454025000000000
-        span_s = 5
-        duration_display = "5.0s"
+        t_min = 0
+        t_max = 1
+        span_s = 1
+        duration_display = "0.0s"
 
     # Display compact single-line status indicator using BinCacheManager
     with st.sidebar:
@@ -962,17 +1428,25 @@ def main() -> None:
         # =====================================================================
         st.markdown("### 📖 2. Vendor Error Manual (RAG)")
 
+        manual_profile_options = [
+            "Auto-Matched (Default)",
+            "ArduPilot Flight DataFlash",
+            "PX4 Autopilot uORB",
+            "FSS Native Telemetry",
+            "Microservices Architecture",
+            "Industrial PLC & Manufacturing",
+            "Autonomous Vehicle CAN Bus",
+            "Warehouse AGVs & Robotics",
+            "Consolidated (All Built-in)",
+            "Custom File Upload Only",
+        ]
+        active_prof = st.session_state.get("active_manual_profile")
+        default_prof_idx = manual_profile_options.index(active_prof) if active_prof in manual_profile_options else 0
+
         manual_profile = st.selectbox(
             "Error Manual Profile",
-            [
-                "Auto-Matched (Default)",
-                "ArduPilot Flight DataFlash",
-                "PX4 Autopilot uORB",
-                "FSS Native Telemetry",
-                "Consolidated (All Built-in)",
-                "Custom File Upload Only",
-            ],
-            index=0,
+            manual_profile_options,
+            index=default_prof_idx,
             help="Select the reference fault specification profile to match against decoded telemetry.",
         )
 
@@ -989,14 +1463,27 @@ def main() -> None:
         # 1. Custom manual file
         if custom_manual_file is not None:
             c_bytes = custom_manual_file.getvalue()
-            custom_entries = parse_error_manual(c_bytes, custom_manual_file.name, vendor="custom")
+            custom_entries = parse_error_manual(c_bytes, custom_manual_file.name, vendor="auto")
             active_vendor_entries.extend(custom_entries)
             vendor_label = f"Custom ({custom_manual_file.name})"
 
         # 2. Built-in profile
         if manual_profile != "Custom File Upload Only":
             if manual_profile == "Auto-Matched (Default)":
-                if vendor_hint == "ardupilot":
+                active_prof = st.session_state.get("active_manual_profile")
+                if active_prof == "Microservices Architecture":
+                    active_vendor_entries.extend(load_builtin_manual("microservices"))
+                    vendor_label = "Microservices (Auto-Matched)"
+                elif active_prof == "Industrial PLC & Manufacturing":
+                    active_vendor_entries.extend(load_builtin_manual("industrial_plc"))
+                    vendor_label = "Industrial PLC (Auto-Matched)"
+                elif active_prof == "Autonomous Vehicle CAN Bus":
+                    active_vendor_entries.extend(load_builtin_manual("can_bus"))
+                    vendor_label = "CAN Bus / ECU (Auto-Matched)"
+                elif active_prof == "Warehouse AGVs & Robotics":
+                    active_vendor_entries.extend(load_builtin_manual("warehouse_robots"))
+                    vendor_label = "Warehouse AGVs (Auto-Matched)"
+                elif vendor_hint == "ardupilot":
                     active_vendor_entries.extend(load_builtin_manual("ardupilot"))
                     vendor_label = "ArduPilot (Auto-Matched)"
                 elif vendor_hint == "fss_native":
@@ -1014,6 +1501,18 @@ def main() -> None:
             elif manual_profile == "FSS Native Telemetry":
                 active_vendor_entries.extend(load_builtin_manual("fss_native"))
                 vendor_label = "FSS Native"
+            elif manual_profile == "Microservices Architecture":
+                active_vendor_entries.extend(load_builtin_manual("microservices"))
+                vendor_label = "Microservices"
+            elif manual_profile == "Industrial PLC & Manufacturing":
+                active_vendor_entries.extend(load_builtin_manual("industrial_plc"))
+                vendor_label = "Industrial PLC"
+            elif manual_profile == "Autonomous Vehicle CAN Bus":
+                active_vendor_entries.extend(load_builtin_manual("can_bus"))
+                vendor_label = "Autonomous Vehicle CAN"
+            elif manual_profile == "Warehouse AGVs & Robotics":
+                active_vendor_entries.extend(load_builtin_manual("warehouse_robots"))
+                vendor_label = "Warehouse AGVs"
             elif manual_profile == "Consolidated (All Built-in)":
                 active_vendor_entries.extend(load_builtin_manual("all"))
                 vendor_label = "Consolidated (All)"
@@ -1084,7 +1583,7 @@ def main() -> None:
     # =========================================================================
 
     # Initial probe of detected error codes from sample envelopes for dynamic chips
-    registry = get_schema_registry()
+    registry = get_schema_registry(st.session_state.get("active_schema_path"))
     initial_decoded = decode_all(sample_envelopes[:100], registry) if sample_envelopes else []
     detected_codes = extract_error_codes_from_events(initial_decoded)
     dynamic_chips = generate_dynamic_query_chips(initial_decoded or sample_envelopes, detected_codes, all_sources)
@@ -1093,6 +1592,8 @@ def main() -> None:
     st.subheader("Investigation Query")
     if "operator_query" not in st.session_state:
         st.session_state["operator_query"] = dynamic_chips[0] if dynamic_chips else "Diagnose all detected errors using loaded error manual"
+
+    auto_run = st.session_state.pop("auto_run_mvp_analysis", False)
 
     with st.form("investigation_query_form", clear_on_submit=False):
         col_q, col_btn = st.columns([5, 2])
@@ -1125,17 +1626,24 @@ def main() -> None:
     st.markdown("<div style='margin-bottom: 14px;'></div>", unsafe_allow_html=True)
 
     # =========================================================================
-    # RETRIEVAL EXECUTION: Full Dataset vs Bounded Slicing
+    # STAGE 1: Java Storage & Bounded Retrieval (Java Layer Only)
     # =========================================================================
     retrieval_res: RetrievalResult
     condensed_events: list[dict[str, Any]] = []
+    receipt: JavaReceipt | None = None
 
-    with st.spinner("Executing Java BlockStore retrieval & telemetry condensation..."):
+    stage1_box = st.status("Step 1: Java Storage & Bounded Retrieval (Java Layer Only)...", expanded=True)
+    with stage1_box:
+        st.markdown(
+            "⏳ *Executing Java-only storage reading & bounded retrieval over IPC...* "
+            "<span class='fss-status-pill online' style='font-size:0.7rem;'>ISOLATED FROM RAG</span>",
+            unsafe_allow_html=True,
+        )
         try:
             with retriever_wrapper as retriever:
                 if analysis_scope.startswith("Full"):
                     # Whole dataset retrieval
-                    envelope = retriever.retrieve_full_dataset(source=source_arg, max_events=10000)
+                    envelope = retriever.retrieve_full_dataset(source=source_arg, max_events=10000, trace_id=trace_id)
                     wire_records = [ev.to_event_record() if hasattr(ev, "to_event_record") else ev for ev in envelope.events]
                     raw_decoded = decode_all(wire_records, registry)
                     condensed_dicts = condense_telemetry(raw_decoded, max_events_target=1000)
@@ -1175,18 +1683,83 @@ def main() -> None:
                         t_end_ns,
                         int(max_events_bound),
                         _retriever=retriever,
+                        trace_id=trace_id,
                     )
                     raw_decoded = decode_all(retrieval_res.events, registry)
                     condensed_events = raw_decoded
                     t_start_effective = t_start_ns
                     t_end_effective = t_end_ns
 
+                receipt = getattr(retrieval_res, "receipt", None) or retriever.get_last_receipt()
+
+            stage1_box.update(
+                label=f"Step 1 Complete: Java Retrieval Verified ({len(retrieval_res.events):,} records returned)",
+                state="complete",
+                expanded=False,
+            )
         except RetrievalRequestError as exc:
+            stage1_box.update(label=f"Step 1 Failed: Contract Violation ({exc})", state="error")
             st.error(f"Retrieval Request Contract Violation: {exc}")
             st.stop()
         except Exception as exc:
+            stage1_box.update(label=f"Step 1 Failed: Java Error ({exc})", state="error")
             st.error(f"JavaStoreBridge Retrieval Failure: {exc}")
             st.stop()
+
+    # Display Java Retrieval Receipt Card
+    if receipt is not None:
+        slices_info = f" ({receipt.slices_queried} bounded IPC slice{'s' if receipt.slices_queried > 1 else ''})" if getattr(receipt, "slices_queried", 1) > 0 else ""
+        min_utc = fmt_ns(receipt.min_ts_ns) if receipt.min_ts_ns else "N/A"
+        max_utc = fmt_ns(receipt.max_ts_ns) if receipt.max_ts_ns else "N/A"
+        rec_html = f"""
+        <div class="fss-card" style="margin-bottom: 1rem;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 0.6rem;">
+                <span style="font-family:'IBM Plex Mono',monospace; font-weight:600; font-size:0.86rem; color:var(--text); letter-spacing:0.04em;">
+                    JAVA RETRIEVAL RECEIPT // STAGE 1 VERIFIED
+                </span>
+                <span class="fss-status-pill online">UNSEEN STORE · ISOLATED FROM RAG</span>
+            </div>
+            <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0.65rem; font-family:'IBM Plex Mono',monospace; font-size:0.82rem;">
+                <div><span style="color:var(--muted);">Java Engine:</span> <code>{html.escape(receipt.java_engine)}</code></div>
+                <div><span style="color:var(--muted);">Layout:</span> <code>{html.escape(receipt.store_layout)}</code></div>
+                <div><span style="color:var(--muted);">Events Returned:</span> <code>{receipt.events_returned:,}</code></div>
+                <div><span style="color:var(--muted);">IPC Latency:</span> <code>{receipt.java_ipc_latency_ms:.2f} ms</code></div>
+                <div><span style="color:var(--muted);">Timestamp Span:</span> <code>[{receipt.min_ts_ns} .. {receipt.max_ts_ns}] ns</code></div>
+                <div><span style="color:var(--muted);">Trace ID:</span> <code>{html.escape(receipt.trace_id[:12])}</code></div>
+            </div>
+            <div style="font-size:0.75rem; color:#8E9E99; margin-top:0.4rem; font-family:'IBM Plex Mono',monospace;">
+                UTC Range: <code>{min_utc}</code> → <code>{max_utc}</code> UTC{slices_info}
+            </div>
+            <div style="font-size:0.75rem; color:var(--muted); margin-top:0.25rem; font-family:'IBM Plex Mono',monospace;">
+                External Source Path: <code>{html.escape(receipt.external_path)}</code>
+            </div>
+        </div>
+        """
+        st.markdown(rec_html, unsafe_allow_html=True)
+
+    # Short-circuit Stage 2 if zero records returned
+    if len(retrieval_res.events) == 0:
+        st.warning(
+            f"Zero telemetry events were recorded or retrieved by Java within the requested window "
+            f"[{fmt_ns(t_start_effective)}, {fmt_ns(t_end_effective)}) UTC. "
+            f"Stage 2 (RAG & Synthesis) short-circuited to prevent hallucination."
+        )
+        st.stop()
+
+    # Check pause toggle if operator requested inspection pause
+    auto_run_stage2 = st.session_state.get("auto_run_stage2", True)
+    if not auto_run_stage2:
+        col_msg, col_btn = st.columns([4, 2])
+        with col_msg:
+            st.info("Stage 1 verified. Inspect Java receipt above. Click button to proceed with Stage 2 RAG & Qwen synthesis.")
+        with col_btn:
+            run_s2 = st.button("⚡ Run Stage 2: RAG & Synthesis on Java Output", type="primary", use_container_width=True)
+        if not run_s2:
+            st.stop()
+
+    # =========================================================================
+    # STAGE 2: Python Decoding -> Vendor Manual RAG -> Synthesis Output
+    # =========================================================================
 
     # Build Grounded Evidence
     evidence = build_evidence(condensed_events, query=query, retrieval=retrieval_res)

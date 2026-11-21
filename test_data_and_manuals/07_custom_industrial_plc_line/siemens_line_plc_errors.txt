@@ -1,0 +1,36 @@
+Siemens Simatic Manufacturing Line PLC Reference Manual
+========================================================
+
+This technical manual documents safety interlock trip codes, conveyor operational states, and thermal monitoring parameters for industrial manufacturing assembly lines.
+
+1. Subsystem Error & Status Codes
+----------------------------------
+
+| Error Code | Subsystem | Severity | Title / Meaning | Causes | Actions |
+|---|---|---|---|---|---|
+| OVERHEAT | Safety_Interlock | CRITICAL | Thermal Overheat Safety Interlock Trip | Spindle bearing temperature exceeding 85°C; coolant pump failure; thermal sensor drift | Halt spindle rotation immediately; check coolant reservoir and pump; inspect bearing lubrication |
+| EMERGENCY_STOP | Safety_Interlock | CRITICAL | Emergency Stop Circuit Tripped | Operator struck physical E-stop mushroom button; safety relay opened | Clear machinery area; reset safety relay |
+| PRESSURE_LOSS | Safety_Interlock | CRITICAL | Hydraulic/Pneumatic Pressure Loss | Ruptured pressure line; compressor supply cutoff | Inspect pneumatic lines and hydraulic seals |
+| RUNNING | Conveyor_Line | NOMINAL | Conveyor Transport Running | Conveyor motor active and belt speed within nominal target | Continue normal production cycles |
+| STARVED | Conveyor_Line | WARNING | Conveyor Line Starved | Upstream station halted or delayed; part feeder empty; upstream interlock tripped | Inspect upstream machine status; replenish part feeder hopper; resume upstream production |
+| BLOCKED | Conveyor_Line | WARNING | Conveyor Line Blocked | Downstream station bottlenecked; photo-eye beam blocked > 10 seconds; pallet jam | Clear jammed pallet at conveyor transfer gate |
+| 0x0301 | Thermal_Sensors | WARNING | Temperature Status Telemetry Frame | Periodic or drift temperature report | Monitor thermal trend |
+| 0x0302 | Safety_Interlock | CRITICAL | Safety Interlock Trip Frame | Safety interlock status transition | Verify interlock reset condition |
+| 0x0303 | Conveyor_Line | WARNING | Conveyor State Telemetry Frame | Material handling state change | Track line throughput |
+
+2. Detailed Diagnostic Descriptions
+------------------------------------
+
+### [OVERHEAT] Thermal Overheat Safety Interlock
+- Subsystem: Safety_Interlock
+- Severity: CRITICAL
+- Description: Spindle thermal sensor exceeded safe operating limit (85°C), commanding immediate emergency interlock trip.
+- Causes: Coolant pump circuit breaker tripped; sensor drift causing false positive; bearing failure generating friction heat.
+- Actions: Allow spindle cooldown; check coolant flow sensor; check temperature sensor calibration; inspect spindle bearing for scoring.
+
+### [STARVED] Conveyor Line Starved
+- Subsystem: Conveyor_Line
+- Severity: WARNING
+- Description: Conveyor belt running empty because upstream machining cell ceased feeding parts.
+- Causes: Upstream spindle interlock shutdown; part feeder empty.
+- Actions: Restore upstream machining operation once safety cleared.

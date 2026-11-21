@@ -1,0 +1,34 @@
+PX4 Autopilot Fault Diagnostics and Sensor Innovation Manual
+=============================================================
+
+This technical specification documents PX4 Autopilot system health flags, estimator status errors, sensor innovation faults, and diagnostic status reporting.
+
+1. Diagnostic Codes Reference Table
+------------------------------------
+
+| Error Code | Subsystem | Severity | Title / Meaning | Causes | Actions |
+|---|---|---|---|---|---|
+| DIAG_STATUS | Diagnostics | WARNING | Diagnostic Telemetry Status | Periodic or event-driven sensor bus and health status | Monitor sensor innovation and bus voltage |
+| DEGRADED | Diagnostics | WARNING | Subsystem Degraded | High sensor innovation variance, elevated processor temperature (>50°C), minor bus packet loss | Check sensor calibration, inspect electronics cooling airflow |
+| FAULT | Diagnostics | CRITICAL | Critical Flight Controller Fault | Sensor communication timeout, hardware watchdog reset, extreme temperature (>65°C) | Trigger autonomous Return-to-Land (RTL) or immediate emergency landing |
+| BARO_DRIFT | Sensors | WARNING | Barometer Innovation Drift | Pressure fluctuation from high propwash turbulence, static port obstruction | Shield barometer sensor diaphragm with open-cell foam, verify static port |
+| SENSOR_BARO_FAULT | Sensors | ERROR | Barometer Hardware Bus Failure | I2C/SPI bus read timeout, intermittent wire harness connection | Inspect sensor wiring harness and terminal connector, reseat connector |
+| 0x30 | Diagnostics | WARNING | Diagnostic Telemetry Event Frame | Diagnostic status frame logged by flight computer | Audit diagnostic status flags |
+| 0x45 | FlightControl | ERROR | Safety Error Record Logged | Critical safety event requiring post-flight operator audit | Review detailed flight log |
+
+2. Subsystem Fault Descriptions
+--------------------------------
+
+### [DEGRADED] Subsystem Degraded
+- Subsystem: Diagnostics
+- Severity: WARNING
+- Description: Autopilot detected sub-optimal sensor or estimator health, operating with degraded redundancy.
+- Causes: Propwash aerodynamic interference; minor thermal throttling.
+- Actions: Monitor telemetry; land if condition worsens.
+
+### [FAULT] Critical Flight Controller Fault
+- Subsystem: Diagnostics
+- Severity: CRITICAL
+- Description: Severe internal hardware or sensor communication failure.
+- Causes: Sensor bus stall; hardware watchdog trip.
+- Actions: Execute emergency landing immediately.

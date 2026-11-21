@@ -1,0 +1,26 @@
+================================================================================
+FSS TEST GUIDE: 07_custom_industrial_plc_line
+================================================================================
+
+1. BUNDLE SUMMARY:
+   - Binary File: plc_spindle_interlock.fss.bin (Contract v0 Little-Endian, 24 events)
+   - Manual File: siemens_line_plc_errors.txt (Plain-text format, Siemens Line PLC manual)
+   - Domain: D3 Industrial PLC / Automation
+
+2. STEP-BY-STEP UI VERIFICATION INSTRUCTIONS:
+   a. Open http://127.0.0.1:8501.
+   b. In sidebar under 'Storage & Data Source', select 'Upload Custom Binary (.bin / .fss.bin)'.
+   c. Upload 'plc_spindle_interlock.fss.bin'.
+   d. In 'Domain / Error Manual', upload 'siemens_line_plc_errors.txt'.
+   e. Set 'Analysis Scope' to 'FULL DATASET (All Events)'.
+   f. Enter the query below and execute synthesis.
+
+3. SUGGESTED UI QUERY:
+   "Why did the spindle safety interlock trip, why did the conveyor enter a starved state, and what caused the thermal runaway?"
+
+4. EXPECTED OUTPUT & VALIDATION BADGES:
+   - Matched Error Rules: >= 2 rules matched (OVERHEAT, STARVED)
+   - Causal Chain: Accurately explains Spindle 301 overheating (88.5°C) -> INTERLOCK tripped -> Conveyor 302 starved.
+   - Opaque Handling (Hard Rule 10): Event 0x007F safely identified as UNKNOWN_EVENT_TYPE without leaking raw bytes.
+   - Citations: [ev-...] and [err-siemens_line_plc_errors-...]
+================================================================================

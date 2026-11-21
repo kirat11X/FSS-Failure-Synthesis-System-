@@ -1,0 +1,25 @@
+================================================================================
+FSS TEST GUIDE: 10_custom_hft_fix_storm
+================================================================================
+
+1. BUNDLE SUMMARY:
+   - Binary File: hft_fix_reject_storm.fss.bin (Contract v0 Little-Endian, 40 events)
+   - Manual File: apex_fix_gateway_errors.csv (CSV format, Apex Trading Systems FIX manual)
+   - Domain: D6 Financial HFT / FIX Gateway
+
+2. STEP-BY-STEP UI VERIFICATION INSTRUCTIONS:
+   a. Open http://127.0.0.1:8501.
+   b. In sidebar under 'Storage & Data Source', select 'Upload Custom Binary (.bin / .fss.bin)'.
+   c. Upload 'hft_fix_reject_storm.fss.bin'.
+   d. In 'Domain / Error Manual', upload 'apex_fix_gateway_errors.csv'.
+   e. Set 'Analysis Scope' to 'FULL DATASET (All Events)'.
+   f. Enter the query below and execute synthesis.
+
+3. SUGGESTED UI QUERY:
+   "Why were client order cancellations rejected with TOO_LATE_TO_CANCEL and UNKNOWN_ORDER during the market volatility spike?"
+
+4. EXPECTED OUTPUT & VALIDATION BADGES:
+   - Matched Error Rules: >= 2 rules matched (TOO_LATE_TO_CANCEL, UNKNOWN_ORDER, REJECTED)
+   - High-Frequency Sequence: Distinguishes between orders filled before cancel arrival vs orders missing from book cache.
+   - Citations: [ev-...] and [err-apex_fix_gateway_errors-...]
+================================================================================

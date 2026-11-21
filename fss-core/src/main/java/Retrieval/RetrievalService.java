@@ -46,6 +46,98 @@ public final class RetrievalService {
         this.envelope = config.envelope;
     }
 
+    public StoreBounds discoverBounds() throws IOException {
+        long minTs = Long.MAX_VALUE;
+        long maxTs = Long.MIN_VALUE;
+        int totalBlocks = 0;
+        List<Long> knownSources = new ArrayList<>();
+        List<StoreBounds.SegmentWindow> segmentWindows = new ArrayList<>();
+
+        if (Files.exists(segmentsDirectory)) {
+            try (Stream<Path> segments = Files.list(segmentsDirectory)) {
+                List<Path> segmentDirs = segments.filter(Files::isDirectory).sorted().toList();
+                for (Path segment : segmentDirs) {
+                    long segMinTs = Long.MAX_VALUE;
+                    long segMaxTs = Long.MIN_VALUE;
+                    int segBlocks = 0;
+
+                    for (Mapping mapping : findMappings(segment, true, 0)) {
+                        if (!knownSources.contains(mapping.agentId())) {
+                            knownSources.add(mapping.agentId());
+                        }
+                        List<Long> blockIds = readBlockIds(mapping.path());
+                        segBlocks += blockIds.size();
+                        for (long blockId : blockIds) {
+                            try {
+                                BlockMetadata metadata = metadataStore.read(blockId);
+                                if (metadata.usedLength() > 0) {
+                                    if (metadata.startTime() < segMinTs) segMinTs = metadata.startTime();
+                                    if (metadata.endTime() > segMaxTs) segMaxTs = metadata.endTime();
+                                }
+                            } catch (Exception ignored) {
+                            }
+                        }
+                    }
+
+                    // Fallback to segment folder timestamp if blocks didn't yield bounds
+                    if (segMinTs == Long.MAX_VALUE) {
+                        String name = segment.getFileName().toString();
+                        if (name.startsWith("segment-")) {
+                            try {
+                                long segStart = Long.parseUnsignedLong(name.substring(8));
+                                segMinTs = segStart;
+                                segMaxTs = segStart + (config.segmentDurationMillis > 0 ? config.segmentDurationMillis * 1_000_000L : 60_000_000_000L);
+                            } catch (Exception ignored) {
+                            }
+                        }
+                    }
+
+                    if (segBlocks > 0 && segMinTs <= segMaxTs) {
+                        segmentWindows.add(new StoreBounds.SegmentWindow(
+                                Long.toUnsignedString(segMinTs),
+                                Long.toUnsignedString(segMaxTs),
+                                segBlocks));
+                        if (segMinTs < minTs) minTs = segMinTs;
+                        if (segMaxTs > maxTs) maxTs = segMaxTs;
+                        totalBlocks += segBlocks;
+                    }
+                }
+            }
+        }
+
+        // Fallback: scan metadataStore directly if no segments yielded windows
+        if (segmentWindows.isEmpty()) {
+            try {
+                long count = metadataStore.nextBlockId();
+                for (long bId = 0; bId < count; bId++) {
+                    try {
+                        BlockMetadata metadata = metadataStore.read(bId);
+                        if (metadata.usedLength() > 0) {
+                            if (metadata.startTime() < minTs) minTs = metadata.startTime();
+                            if (metadata.endTime() > maxTs) maxTs = metadata.endTime();
+                            totalBlocks++;
+                        }
+                    } catch (Exception ignored) {
+                    }
+                }
+                if (totalBlocks > 0 && minTs <= maxTs) {
+                    segmentWindows.add(new StoreBounds.SegmentWindow(
+                            Long.toUnsignedString(minTs),
+                            Long.toUnsignedString(maxTs),
+                            totalBlocks));
+                }
+            } catch (Exception ignored) {
+            }
+        }
+
+        if (minTs <= maxTs && (totalBlocks > 0 || !segmentWindows.isEmpty())) {
+            knownSources.sort(Long::compareUnsigned);
+            return StoreBounds.ok(minTs, maxTs, segmentWindows.size(), totalBlocks, segmentWindows, knownSources);
+        }
+
+        return StoreBounds.empty();
+    }
+
     public List<RetrievalRecord> retrieve(
             boolean allSources,
             long agentId,

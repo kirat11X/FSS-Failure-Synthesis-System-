@@ -239,6 +239,7 @@ public final class UdsBridgeServer {
                         case "ping" -> responseNode = handlePing(traceId);
                         case "retrieve" -> responseNode = handleRetrieve(reqJson, traceId);
                         case "retrieve_full" -> responseNode = handleRetrieveFull(reqJson, traceId);
+                        case "bounds", "store_bounds" -> responseNode = handleBounds(reqJson, traceId);
                         case "shutdown" -> {
                             responseNode = handleShutdown(traceId);
                             isShutdown = true;
@@ -305,6 +306,9 @@ public final class UdsBridgeServer {
         if (reqJson.has("retrieve_full")) {
             return "retrieve_full";
         }
+        if (reqJson.has("bounds") || reqJson.has("store_bounds")) {
+            return "bounds";
+        }
         if (reqJson.has("shutdown")) {
             return "shutdown";
         }
@@ -343,6 +347,111 @@ public final class UdsBridgeServer {
         res.put("shutting_down", true);
         res.put("trace_id", traceId);
         return res;
+    }
+
+    private ObjectNode handleBounds(JsonNode req, String traceId) throws IOException {
+        String storePathStr = req.has("store_path") ? req.get("store_path").asText()
+                : (req.has("store") ? req.get("store").asText() : null);
+
+        if (storePathStr == null || storePathStr.isBlank()) {
+            throw new IllegalArgumentException("store_path is required");
+        }
+
+        Path sPath = Path.of(storePathStr).toAbsolutePath().normalize();
+        if (!Files.exists(sPath)) {
+            throw new IOException("Store path does not exist: " + sPath);
+        }
+
+        ObjectNode res = MAPPER.createObjectNode();
+        res.put("trace_id", traceId);
+
+        // Check if sPath is a segmented store directory (or blocks.dat inside segmented store)
+        Path rootDir = Files.isDirectory(sPath) ? sPath : sPath.getParent();
+        if (rootDir != null && (Files.exists(rootDir.resolve("block-metadata.dat")) || Files.exists(rootDir.resolve("segments")))) {
+            Path blocksDat = rootDir.resolve("blocks.dat");
+            Path metaDat = rootDir.resolve("block-metadata.dat");
+            Path envCfg = rootDir.resolve("envelope.cfg");
+            if (!Files.exists(envCfg)) {
+                envCfg = Path.of("fss-core/envelope.cfg").toAbsolutePath();
+            }
+            Storage.EnvelopeConfig env = Files.exists(envCfg)
+                    ? Storage.EnvelopeConfig.load(envCfg, ByteOrder.BIG_ENDIAN)
+                    : null;
+            Storage.StorageConfig cfg = new Storage.StorageConfig(
+                    rootDir, 65536, 1048576, 4096, 60000, env
+            );
+            Storage.BlockStore bStore = new Storage.BlockStore(blocksDat);
+            Storage.BlockMetadataStore mStore = new Storage.BlockMetadataStore(metaDat, 65536);
+            Storage.SegmentMetadataStore sStore = new Storage.SegmentMetadataStore(rootDir);
+            try {
+                RetrievalService rService = new RetrievalService(cfg, bStore, mStore, sStore);
+                StoreBounds bounds = rService.discoverBounds();
+                res.put("status", bounds.status());
+                if (bounds.min_ts_ns() != null) res.put("min_ts_ns", bounds.min_ts_ns());
+                if (bounds.max_ts_ns() != null) res.put("max_ts_ns", bounds.max_ts_ns());
+                res.put("segment_count", bounds.segment_count());
+                res.put("block_count", bounds.block_count());
+                ArrayNode winArr = res.putArray("segment_windows");
+                for (StoreBounds.SegmentWindow sw : bounds.segment_windows()) {
+                    ObjectNode w = winArr.addObject();
+                    w.put("start_ts_ns", sw.start_ts_ns());
+                    w.put("end_ts_ns", sw.end_ts_ns());
+                    w.put("block_count", sw.block_count());
+                }
+                ArrayNode srcArr = res.putArray("known_sources");
+                for (Long src : bounds.known_sources()) {
+                    srcArr.add(src);
+                }
+                return res;
+            } finally {
+                mStore.close();
+                bStore.close();
+            }
+        }
+
+        // Single-file J1 .dat store
+        ReentrantReadWriteLock rwLock = getLock(sPath);
+        rwLock.readLock().lock();
+        try {
+            try (BlockStore store = openWithRetry(sPath, 3000)) {
+                List<BlockInfo> blocks = store.blocks();
+                long minTs = -1L;
+                long maxTs = 0L;
+                boolean found = false;
+                int nonEmpBlocks = 0;
+                for (BlockInfo b : blocks) {
+                    if (!b.empty() && b.recordCount() > 0) {
+                        nonEmpBlocks++;
+                        if (!found || Long.compareUnsigned(b.minTsNs(), minTs) < 0) minTs = b.minTsNs();
+                        if (!found || Long.compareUnsigned(b.maxTsNs(), maxTs) > 0) maxTs = b.maxTsNs();
+                        found = true;
+                    }
+                }
+                if (found && Long.compareUnsigned(minTs, maxTs) <= 0) {
+                    long maxTsQuery = (maxTs == -1L) ? -1L : maxTs + 1L;
+                    res.put("status", "OK");
+                    res.put("min_ts_ns", Long.toUnsignedString(minTs));
+                    res.put("max_ts_ns", Long.toUnsignedString(maxTsQuery));
+                    res.put("segment_count", 1);
+                    res.put("block_count", blocks.size());
+                    ArrayNode winArr = res.putArray("segment_windows");
+                    ObjectNode w = winArr.addObject();
+                    w.put("start_ts_ns", Long.toUnsignedString(minTs));
+                    w.put("end_ts_ns", Long.toUnsignedString(maxTsQuery));
+                    w.put("block_count", nonEmpBlocks);
+                    res.putArray("known_sources");
+                } else {
+                    res.put("status", "EMPTY");
+                    res.put("segment_count", 0);
+                    res.put("block_count", blocks.size());
+                    res.putArray("segment_windows");
+                    res.putArray("known_sources");
+                }
+                return res;
+            }
+        } finally {
+            rwLock.readLock().unlock();
+        }
     }
 
     private ObjectNode handleRetrieve(JsonNode req, String traceId) throws IOException {

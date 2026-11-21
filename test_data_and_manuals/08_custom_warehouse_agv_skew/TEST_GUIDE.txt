@@ -1,0 +1,26 @@
+================================================================================
+FSS TEST GUIDE: 08_custom_warehouse_agv_skew
+================================================================================
+
+1. BUNDLE SUMMARY:
+   - Binary File: agv_clock_skew_chain.fss.bin (Contract v0 Little-Endian, 20 events)
+   - Manual File: logibot_agv_errors.json (JSON format, LogiBot Corp AGV manual)
+   - Domain: D5 Warehouse Robotics / Autonomous Guided Vehicles
+
+2. STEP-BY-STEP UI VERIFICATION INSTRUCTIONS:
+   a. Open http://127.0.0.1:8501.
+   b. In sidebar under 'Storage & Data Source', select 'Upload Custom Binary (.bin / .fss.bin)'.
+   c. Upload 'agv_clock_skew_chain.fss.bin'.
+   d. In 'Domain / Error Manual', upload 'logibot_agv_errors.json'.
+   e. Set 'Analysis Scope' to 'FULL DATASET (All Events)'.
+   f. Enter the query below and execute synthesis.
+
+3. SUGGESTED UI QUERY:
+   "Analyze the sequence of events between AGV-12 and AGV-7, noting any timestamp inversions or clock skew uncertainty."
+
+4. EXPECTED OUTPUT & VALIDATION BADGES:
+   - Matched Error Rules: >= 2 rules matched (ROUTE_BLOCKED, ABORTED, LOW_BATTERY)
+   - Clock Skew Detection: Identifies that AGV-7's replan timestamp appears earlier than AGV-12's fault due to clock skew, resolving true causal order.
+   - Root Cause: AGV-12 battery collapse (5% critical) halting in aisle.
+   - Citations: [ev-...] and [err-logibot_agv_errors-...]
+================================================================================

@@ -55,17 +55,31 @@ public final class RetrievalIpcServer {
             try {
                 JsonNode requestJson = mapper.readTree(requestBytes);
 
-                RetrievalRequest request = RetrievalRequest.fromJson(requestJson);
+                String action = "";
+                if (requestJson.has("action")) {
+                    action = requestJson.get("action").asText();
+                } else if (requestJson.has("command")) {
+                    action = requestJson.get("command").asText();
+                } else if (requestJson.has("bounds")) {
+                    action = "bounds";
+                }
 
-                RetrievalResponse response = RetrievalResponse.success(
-                        retrievalService.retrieve(
-                                request.allSources(),
-                                request.agentId(),
-                                request.startTime(),
-                                request.endTime(),
-                                request.eventType()));
+                if ("bounds".equalsIgnoreCase(action) || "store_bounds".equalsIgnoreCase(action)) {
+                    StoreBounds bounds = retrievalService.discoverBounds();
+                    responseBytes = mapper.writeValueAsBytes(bounds);
+                } else {
+                    RetrievalRequest request = RetrievalRequest.fromJson(requestJson);
 
-                responseBytes = mapper.writeValueAsBytes(response);
+                    RetrievalResponse response = RetrievalResponse.success(
+                            retrievalService.retrieve(
+                                    request.allSources(),
+                                    request.agentId(),
+                                    request.startTime(),
+                                    request.endTime(),
+                                    request.eventType()));
+
+                    responseBytes = mapper.writeValueAsBytes(response);
+                }
 
             } catch (Exception e) {
 
