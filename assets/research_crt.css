@@ -80,8 +80,10 @@ html, body, [data-testid="stAppViewContainer"], .stApp {
   padding-bottom: 2.5rem !important;
 }
 
-/* Screen-reader / invisible title helper */
-.fss-sr-only {
+/* Screen-reader / invisible title helper & hide raw st.title so .fss-masthead is the single masthead */
+.fss-sr-only,
+[data-testid="stAppViewContainer"] h1,
+[data-testid="stHeadingWithActionElements"]:has(h1) {
   display: none !important;
   height: 0 !important;
   margin: 0 !important;

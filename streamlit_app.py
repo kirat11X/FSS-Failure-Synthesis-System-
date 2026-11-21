@@ -912,15 +912,12 @@ def main() -> None:
                 curr_ingested = st.session_state.get("ipc_ingested_file")
                 needs_ingest = curr_ingested != str(ipc_path)
                 if needs_ingest:
-                    st.warning("⚠️ Java IPC Storage needs sync.")
-                    if st.button("📥 Sync Java Storage IPC", use_container_width=True):
-                        with st.spinner("Ingesting into Java Storage IPC..."):
-                            temp_ret = JavaRetriever(mode="storage_ipc", storage_properties=STORAGE_PROPERTIES)
-                            temp_ret.ingest_clean(ipc_path)
-                            st.session_state["ipc_ingested_file"] = str(ipc_path)
-                            st.cache_resource.clear()
-                            st.cache_data.clear()
-                            st.rerun()
+                    with st.spinner(f"Synchronizing Java Storage IPC with {sel_f}..."):
+                        temp_ret = JavaRetriever(mode="storage_ipc", storage_properties=STORAGE_PROPERTIES)
+                        temp_ret.ingest_clean(ipc_path)
+                        st.session_state["ipc_ingested_file"] = str(ipc_path)
+                        st.cache_resource.clear()
+                        st.cache_data.clear()
 
         # Detect wire format & vendor hint
         detected_fmt, vendor_hint = detect_binary_format(raw_bytes_sample)
@@ -1090,13 +1087,15 @@ def main() -> None:
             duration = st.slider("Window Length (seconds, max 3600)", 1, 3600, max_duration)
             max_events_bound = st.number_input("Max Events Limit", min_value=10, max_value=20000, value=1000, step=100)
             t_start_ns = t_min + offset * 10**9
-            t_end_ns = min(t_start_ns + duration * 10**9, t_start_ns + MAX_WINDOW_NS)
+            t_end_ns = max(t_start_ns + 1, min(t_start_ns + duration * 10**9, t_start_ns + MAX_WINDOW_NS))
         else:
             offset = 0
             duration = span_s
             max_events_bound = 10000
             t_start_ns = t_min
-            t_end_ns = t_max + 1
+            t_end_ns = max(t_min + 1, t_max + 1)
+            if t_end_ns - t_start_ns > MAX_WINDOW_NS:
+                t_end_ns = t_start_ns + MAX_WINDOW_NS
 
         source_arg = ALL if source_selection == "ALL" else int(source_selection)
 
@@ -1171,8 +1170,17 @@ def main() -> None:
                     if not condensed_events and raw_decoded:
                         condensed_events = raw_decoded
 
-                    t_start_effective = envelope.min_ts_ns or t_min
-                    t_end_effective = envelope.max_ts_ns or t_max
+                    if wire_records:
+                        ts_list = [e.timestamp_ns for e in wire_records]
+                        t_start_effective = min(ts_list)
+                        t_end_effective = max(t_start_effective + 1, max(ts_list) + 1)
+                    else:
+                        t_start_effective = t_min
+                        t_end_effective = max(t_min + 1, t_max + 1)
+
+                    if t_end_effective - t_start_effective > MAX_WINDOW_NS:
+                        t_end_effective = t_start_effective + MAX_WINDOW_NS
+
                     retrieval_res = RetrievalResult(
                         request=RetrievalRequest(
                             source=source_arg,
