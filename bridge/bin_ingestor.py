@@ -20,37 +20,18 @@ from typing import Any, BinaryIO, Sequence
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 
-# Critical event type codes and labels
-CRITICAL_EVENT_TYPES: set[int] = {
-    0x10,  # LIDAR_STATUS
-    0x20,  # AVOIDANCE
-    0x21,  # FORMATION_STATE
-    0x30,  # DIAGNOSTIC
-    0x43,  # EKF_STATUS
-    0x44,  # VIBRATION
-    0x45,  # ERROR_EVENT
-}
-
-CRITICAL_KEYWORDS: tuple[str, ...] = (
-    "ERR",
+FAILURE_INDICATORS: tuple[str, ...] = (
     "ERROR",
-    "AVOID",
-    "AVOIDANCE",
-    "LIDAR",
-    "DIAG",
-    "DIAGNOSTIC",
-    "FORMATION",
-    "MODE",
-    "EKF",
-    "VIBE",
-    "VIBRATION",
     "FAULT",
-    "WARN",
+    "FAIL",
     "WARNING",
+    "WARN",
+    "ALARM",
     "CRITICAL",
     "TIMEOUT",
     "DISCONNECT",
-    "BREACH",
+    "INVALID",
+    "DEGRADED",
 )
 
 
@@ -176,126 +157,33 @@ def get_source_id(ev: dict[str, Any] | Any) -> int:
 
 
 def is_critical_event(ev: dict[str, Any] | Any) -> bool:
-    """Determine whether an event is critical (errors, faults, avoidance, mode changes, breaches)."""
-    # 1. Event type check
-    ev_type = get_event_type(ev)
-    if isinstance(ev_type, int):
-        if ev_type in CRITICAL_EVENT_TYPES:
-            return True
-    elif isinstance(ev_type, str):
-        u = ev_type.strip().upper()
-        if u.startswith("0X"):
-            try:
-                code = int(u, 16)
-                if code in CRITICAL_EVENT_TYPES:
-                    return True
-            except ValueError:
-                pass
-        for kw in CRITICAL_KEYWORDS:
-            if kw in u:
-                return True
-
-    # 2. Event name check
-    ev_name = ""
-    if isinstance(ev, dict):
-        ev_name = str(ev.get("event_name", "")).upper()
-    else:
-        ev_name = str(getattr(ev, "event_name", "")).upper()
-
-    if ev_name:
-        for kw in CRITICAL_KEYWORDS:
-            if kw in ev_name:
-                return True
-
-    # 3. Decode status check
-    d_status = ""
-    if isinstance(ev, dict):
-        d_status = str(ev.get("decode_status", "")).upper()
-    else:
-        d_status = str(getattr(ev, "decode_status", "")).upper()
-
-    if d_status and d_status not in ("SUCCESS", "DECODED"):
+    """Flag generic failure indicators without assigning meaning to numeric codes."""
+    get_value = (
+        (lambda key, default="": ev.get(key, default))
+        if isinstance(ev, dict)
+        else (lambda key, default="": getattr(ev, key, default))
+    )
+    decode_status = str(get_value("decode_status")).upper()
+    if decode_status and decode_status not in {"SUCCESS", "DECODED", "OK"}:
         return True
 
-    # 4. Fields inspection (status codes, errors, faults, variances, threshold breaches)
-    fields = {}
-    if isinstance(ev, dict):
-        fields = ev.get("fields", {})
-    else:
-        fields = getattr(ev, "fields", {})
-
+    fields = get_value("fields", {})
+    values = [
+        get_value("event_type"),
+        get_value("event_name"),
+        *get_value("interpreted_fields", []),
+    ]
     if isinstance(fields, dict):
-        # Non-zero status code
-        status_code = fields.get("status_code")
-        if status_code is not None:
-            try:
-                if int(status_code) > 0:
+        for key, value in fields.items():
+            if any(term in str(key).upper() for term in ("ERROR", "FAULT", "ALARM")):
+                if value not in (None, "", 0, "0", False):
                     return True
-            except (ValueError, TypeError):
-                pass
-
-        # Timeouts
-        timeout_cnt = fields.get("timeout_count")
-        if timeout_cnt is not None:
-            try:
-                if int(timeout_cnt) > 0:
-                    return True
-            except (ValueError, TypeError):
-                pass
-
-        # Reason code / avoidance reason
-        reason_code = fields.get("reason_code")
-        if reason_code is not None:
-            try:
-                if int(reason_code) > 0:
-                    return True
-            except (ValueError, TypeError):
-                pass
-
-        # State code (e.g. 1=LEFT_FORMATION, 2=REJOINING)
-        state_code = fields.get("state_code")
-        if state_code is not None:
-            try:
-                if int(state_code) > 0:
-                    return True
-            except (ValueError, TypeError):
-                pass
-
-        # Clipping / vibration fault
-        clip = fields.get("clipping")
-        if clip is not None:
-            try:
-                if int(clip) > 0:
-                    return True
-            except (ValueError, TypeError):
-                pass
-
-        # High EKF variance (> 0.5)
-        for v_field in ("compass_variance", "velocity_variance", "position_variance"):
-            v_val = fields.get(v_field)
-            if v_val is not None:
-                try:
-                    if float(v_val) > 0.5:
-                        return True
-                except (ValueError, TypeError):
-                    pass
-
-        # Battery breach (< 20%)
-        rem = fields.get("remaining_pct")
-        if rem is not None:
-            try:
-                if float(rem) < 20.0:
-                    return True
-            except (ValueError, TypeError):
-                pass
-
-        # Textual indications in field values
-        for val in fields.values():
-            s_val = str(val).upper()
-            if any(k in s_val for k in ("FAULT", "DEGRADED", "COLLISION", "TIMEOUT", "DISCONNECT", "ERROR")):
-                return True
-
-    return False
+            values.append(value)
+    return any(
+        indicator in str(value).upper()
+        for value in values
+        for indicator in FAILURE_INDICATORS
+    )
 
 
 def _to_event_dict(ev: dict[str, Any] | Any) -> dict[str, Any]:
@@ -320,10 +208,8 @@ def condense_telemetry(
     """Smart whole-dataset telemetry condensation.
 
     Guarantees:
-      - Keeps 100% of errors, warnings, faults, mode changes, threshold breaches, and state transitions
-        (e.g., event_types ERR 0x45, AVOIDANCE 0x20, LIDAR 0x10, DIAG 0x30, EKF 0x43, etc.).
-      - Downsamples repetitive nominal heartbeat/attitude/GPS frames into compact periodic summaries
-        or phase envelopes across the flight lifecycle.
+      - Keeps events marked by generic failure or decode-warning indicators when possible.
+      - Uniformly downsamples the remaining events when they exceed the target budget.
       - Returns chronologically ordered event dicts under the target event budget.
     """
     if not events:

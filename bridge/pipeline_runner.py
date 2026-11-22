@@ -11,10 +11,9 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 # Ensure project root is in sys.path
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -28,13 +27,7 @@ from fss_py.schema import DEFAULT_SCHEMA_PATH, load_schema_file
 from fss_py.wire import iter_envelopes
 
 from bridge.clock_skew_compensator import analyze_clock_skew
-from bridge.hybrid_rag import (
-    HistoricalIncident,
-    format_exemplars_cot,
-    retrieve_historical_exemplars,
-    retrieve_hybrid_knowledge,
-)
-from bridge.progressive_investigator import ProgressiveInvestigator, investigate_progressive
+from bridge.progressive_investigator import investigate_progressive
 from bridge.report_exporter import export_html, export_jsonld, export_pdf
 from bridge.synthesizer import (
     DEFAULT_NUM_CTX,
@@ -77,8 +70,6 @@ def render_report(
     synthesis: dict[str, Any],
     val_report: Any,
     model_name: str,
-    exemplars: Sequence[HistoricalIncident] | None = None,
-    vendor_matches: list[dict[str, Any]] | None = None,
 ) -> str:
     """Render the official 8-part FSS Failure Synthesis Report."""
     ret_req = retrieval_res.request
@@ -168,26 +159,6 @@ def render_report(
         lines.append(f"- `{k['chunk']}` ({k['kind']}, {k['domain']}; explains {k.get('explains', 'N/A')}):")
         for kline in k["content"].splitlines():
             lines.append(f"    {kline}")
-    if vendor_matches:
-        lines.append("")
-        lines.append(f"Digested Vendor Error-Code Manual Matches ({len(vendor_matches)} matches):")
-        for vm in vendor_matches:
-            vm_id = vm.get("id") or vm.get("err_id") or vm.get("code") or "err-match"
-            if not str(vm_id).startswith(("err-", "doc-")):
-                vm_id = f"err-{vm_id}"
-            lines.append(f"- `{vm_id}`: {vm.get('title', 'Error')} (code={vm.get('code', 'N/A')}, subsys={vm.get('subsystem', 'N/A')}):")
-            if vm.get("description"):
-                lines.append(f"    Description: {vm['description']}")
-            if vm.get("remedy") or vm.get("runbook"):
-                lines.append(f"    Runbook: {vm.get('remedy') or vm.get('runbook')}")
-    if exemplars:
-        lines.append("")
-        lines.append(f"Retrieved {len(exemplars)} Historical Incident Exemplars (RCACopilot Few-Shot CoT):")
-        for ex in exemplars:
-            lines.append(f"- `incident/{ex.incident_id}`: {ex.title}")
-            lines.append(f"    Symptoms: {ex.symptoms}")
-            lines.append(f"    Chain-of-Thought: {ex.condensed_cot}")
-            lines.append(f"    Root Cause: {ex.root_cause}")
     lines.append("")
 
     # [6] LLM Context / Evidence JSON
@@ -196,8 +167,6 @@ def render_report(
         evidence,
         query,
         knowledge,
-        exemplars=exemplars,
-        vendor_manual_matches=vendor_matches,
     )
     lines.append("```text")
     lines.append(llm_context)
@@ -286,7 +255,7 @@ def render_report(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="FSS Pipeline Runner (Python side)")
-    parser.add_argument("--query", default="Why did drone 474 leave formation?", help="Operator query")
+    parser.add_argument("--query", default="Summarize the retrieved telemetry.", help="Operator query")
     parser.add_argument("--schema", default=str(DEFAULT_SCHEMA_PATH), help="Path to schema YAML")
     parser.add_argument("--file", help="Path to envelope .bin file (defaults to reading sys.stdin)")
     parser.add_argument("--start", type=int, default=0, help="Retrieval t_start_ns")
@@ -298,9 +267,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--enable-thinking", action="store_true", default=False, help="Enable Qwen3 thinking mode with sampling")
     parser.add_argument("--thinking-budget", type=int, default=DEFAULT_THINKING_BUDGET, help="Token budget for thinking phase")
     parser.add_argument("--num-ctx", type=int, default=DEFAULT_NUM_CTX, help="Context window length (num_ctx >= 16384)")
-    parser.add_argument("--exemplars-k", type=int, default=3, help="Number of historical incident exemplars to retrieve (3-15)")
-    parser.add_argument("--vendor-manual", default=None, help="Path to vendor error manual JSON file or inline JSON string")
-    parser.add_argument("--error-catalog", default=None, help="Path to error catalog JSON file or inline JSON string")
     parser.add_argument(
         "--json-out",
         nargs="?",
@@ -348,39 +314,6 @@ def main(argv: list[str] | None = None) -> int:
     if not schema_path.is_absolute():
         schema_path = ROOT_DIR / schema_path
     registry = load_schema_file(schema_path)
-
-    # Load vendor manual matches or error catalog if provided
-    vendor_matches: list[dict[str, Any]] = []
-    for source_arg in (args.vendor_manual, args.error_catalog):
-        if not source_arg:
-            continue
-        src_path = Path(source_arg)
-        if not src_path.is_absolute():
-            src_path = ROOT_DIR / src_path
-        if src_path.is_file():
-            try:
-                parsed_data = json.loads(src_path.read_text(encoding="utf-8"))
-                if isinstance(parsed_data, list):
-                    vendor_matches.extend(parsed_data)
-                elif isinstance(parsed_data, dict):
-                    if "errors" in parsed_data and isinstance(parsed_data["errors"], list):
-                        vendor_matches.extend(parsed_data["errors"])
-                    else:
-                        vendor_matches.append(parsed_data)
-            except Exception:
-                pass
-        else:
-            try:
-                parsed_data = json.loads(source_arg)
-                if isinstance(parsed_data, list):
-                    vendor_matches.extend(parsed_data)
-                elif isinstance(parsed_data, dict):
-                    if "errors" in parsed_data and isinstance(parsed_data["errors"], list):
-                        vendor_matches.extend(parsed_data["errors"])
-                    else:
-                        vendor_matches.append(parsed_data)
-            except Exception:
-                pass
 
     # 1. Read envelope stream
     if args.file:
@@ -451,29 +384,22 @@ def main(argv: list[str] | None = None) -> int:
             schema_registry=registry,
             max_context_requests=args.max_context_requests,
             initial_events=events,
-            vendor_manual_matches=vendor_matches,
         )
         evidence = prog_res.evidence
         knowledge = prog_res.knowledge
-        exemplars = prog_res.exemplars
         synthesis = prog_res.synthesis
         val_report = prog_res.validation_report
         model_name = prog_res.model_name
     else:
-        # Standard single-shot retrieval & synthesis
-        # 6. Retrieve knowledge & historical exemplars via Hybrid RAG
+        # Standard single-shot retrieval and synthesis
         knowledge = retrieve_relevant_knowledge(evidence, args.query)
-        exemplars = retrieve_historical_exemplars(args.query, evidence=evidence, k=args.exemplars_k)
 
-        # 7. Synthesize & validate with context window enforcement & think budget guard
         synthesis, val_report, model_name = synthesize_and_validate(
             evidence,
             args.query,
             enable_thinking=args.enable_thinking,
             thinking_budget=args.thinking_budget,
             effective_num_ctx=args.num_ctx,
-            exemplars_k=args.exemplars_k,
-            vendor_manual_matches=vendor_matches,
         )
 
     # 8. Output report or JSON
@@ -485,15 +411,11 @@ def main(argv: list[str] | None = None) -> int:
         synthesis,
         val_report,
         model_name,
-        exemplars=exemplars,
-        vendor_matches=vendor_matches,
     )
 
     out = {
         "evidence": evidence,
         "knowledge": knowledge,
-        "vendor_matches": vendor_matches,
-        "exemplars": [asdict(ex) for ex in exemplars],
         "synthesis": synthesis,
         "validation": {
             "verdict": val_report.verdict,

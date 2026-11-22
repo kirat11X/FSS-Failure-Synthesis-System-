@@ -81,8 +81,6 @@ DOMAIN_CONFIGS: dict[str, dict[str, Any]] = {
     "D1 Drone": {
         "key": "drone",
         "schema_path": ROOT_DIR / "schemas" / "drone_v0.yaml",
-        "manual_path": ROOT_DIR / "domain_manuals" / "fss_custom_telemetry_codes.md",
-        "manual_profile": "FSS Native Telemetry",
         "payload_endian": "<",
         "root_event_type": 0x10,
         "root_event_name": "LIDAR_STATUS",
@@ -97,8 +95,6 @@ DOMAIN_CONFIGS: dict[str, dict[str, Any]] = {
     "D2 Microservices": {
         "key": "microservices",
         "schema_path": ROOT_DIR / "schemas" / "microservices_v0.yaml",
-        "manual_path": ROOT_DIR / "domain_manuals" / "microservices_error_codes.md",
-        "manual_profile": "Microservices Architecture",
         "payload_endian": "<",
         "root_event_type": 0x0201,
         "root_event_name": "DB_POOL_STATUS",
@@ -113,8 +109,6 @@ DOMAIN_CONFIGS: dict[str, dict[str, Any]] = {
     "D3 Industrial PLC": {
         "key": "industrial_plc",
         "schema_path": ROOT_DIR / "schemas" / "industrial_plc_v0.yaml",
-        "manual_path": ROOT_DIR / "domain_manuals" / "industrial_plc_error_codes.md",
-        "manual_profile": "Industrial PLC & Manufacturing",
         "payload_endian": "<",
         "root_event_type": 0x0301,
         "root_event_name": "TEMP_STATUS",
@@ -129,8 +123,6 @@ DOMAIN_CONFIGS: dict[str, dict[str, Any]] = {
     "D4 Vehicle CAN (Big-Endian)": {
         "key": "can_bus",
         "schema_path": ROOT_DIR / "schemas" / "autonomous_vehicle_v0.yaml",
-        "manual_path": ROOT_DIR / "domain_manuals" / "can_bus_error_codes.md",
-        "manual_profile": "Autonomous Vehicle CAN Bus",
         "payload_endian": ">",  # Big-endian payload for automotive CAN
         "root_event_type": 0x0402,
         "root_event_name": "ECU_FAULT",
@@ -145,8 +137,6 @@ DOMAIN_CONFIGS: dict[str, dict[str, Any]] = {
     "D5 Warehouse AGVs": {
         "key": "warehouse_robots",
         "schema_path": ROOT_DIR / "schemas" / "warehouse_robots_v0.yaml",
-        "manual_path": ROOT_DIR / "domain_manuals" / "warehouse_robots_error_codes.md",
-        "manual_profile": "Warehouse AGVs & Robotics",
         "payload_endian": "<",
         "root_event_type": 0x0601,
         "root_event_name": "BATTERY",
@@ -693,8 +683,6 @@ def run_auto_unseen_pipeline(
         "store_path": str(store_path),
         "bin_path": str(bin_path),
         "schema_path": str(dom_cfg["schema_path"]),
-        "matched_manual_profile": dom_cfg["manual_profile"],
-        "manual_path": str(dom_cfg["manual_path"]),
         "blind_query": blind_query,
         "ground_truth": ground_truth,
         "ingest_ms": round(ingest_ms, 2),

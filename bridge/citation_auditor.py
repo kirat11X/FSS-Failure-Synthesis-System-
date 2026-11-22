@@ -2,10 +2,10 @@
 
 Implements the 4-tier epistemic verification pipeline:
   Tier 1 — Metadata ID Integrity & Entity Binding (<5 ms):
-    - Rejects invalid/malformed citations ([ev-fake], [drone-298], [ev-12345], etc.).
+    - Rejects invalid/malformed event and knowledge-base citations.
     - Validates against retrieved JavaRetriever event IDs and Hybrid RAG doc IDs.
     - Enforces mandatory paragraph-level citation coverage (OWASP AISVS 7.4.2).
-    - Deterministic entity-binding checks: ensures claimed component/drone
+    - Deterministic entity-binding checks: ensures claimed source
       matches the primary entity in the cited telemetry (catches deceptive grounding).
   Tier 2 — Post-Hoc Attribution Refinement (P-Cite / VeriCite):
     - Post-hoc claim-to-evidence attribution and bounded refinement (up to 2 retries).
@@ -153,7 +153,7 @@ ABSOLUTE_MODALITY_REGEX = re.compile(
 
 # ForceBench Axis 3: Scope
 UNIVERSAL_SCOPE_REGEX = re.compile(
-    r"\b(all\s+drones|entire\s+fleet|every\s+drone|all\s+nodes|entire\s+swarm|fleet-wide|system-wide|universally|all\s+sensors|every\s+subsystem)\b",
+    r"\b(all\s+sources|every\s+source|all\s+devices|every\s+device|system-wide|universally|all\s+components|every\s+component)\b",
     re.IGNORECASE,
 )
 
@@ -182,34 +182,16 @@ class CitationAuditor:
         query: str = "",
         *,
         auto_refine: bool = True,
-        vendor_manual_matches: list[dict[str, Any]] | None = None,
-        error_catalog: list[dict[str, Any]] | dict[str, Any] | None = None,
     ) -> ValidationReport:
         """Run the complete 4-tier citation and warrant audit."""
         events = evidence.get("events", [])
         known_events = {e["event_id"]: e for e in events}
         known_docs: set[str] = set()
-        known_errs: set[str] = set()
 
         def _register_doc(val: Any) -> None:
             if not val:
                 return
-            s = str(val).strip()
-            known_docs.add(s)
-            if s.startswith("doc-"):
-                known_docs.add(s[4:])
-            else:
-                known_docs.add(f"doc-{s}")
-
-        def _register_err(val: Any) -> None:
-            if not val:
-                return
-            s = str(val).strip()
-            known_errs.add(s)
-            if s.startswith("err-"):
-                known_errs.add(s[4:])
-            else:
-                known_errs.add(f"err-{s}")
+            known_docs.add(str(val).strip())
 
         if knowledge:
             if isinstance(knowledge, dict):
@@ -218,66 +200,13 @@ class CitationAuditor:
                     if isinstance(v, dict):
                         _register_doc(v.get("chunk"))
                         _register_doc(v.get("id"))
-                        _register_doc(v.get("cite_id"))
-                        if v.get("kind") in ("error_code", "vendor_manual") or str(v.get("id", "")).startswith("err-"):
-                            _register_err(v.get("id"))
-                            _register_err(v.get("code"))
             elif isinstance(knowledge, (list, tuple, set)):
                 for k in knowledge:
                     if isinstance(k, dict):
                         _register_doc(k.get("chunk"))
                         _register_doc(k.get("id"))
-                        _register_doc(k.get("cite_id"))
-                        if k.get("kind") in ("error_code", "vendor_manual") or str(k.get("id", "")).startswith("err-"):
-                            _register_err(k.get("id"))
-                            _register_err(k.get("code"))
                     elif isinstance(k, str):
                         _register_doc(k)
-
-        # Register vendor manual matches and error catalogs
-        raw_vendor_matches = list(vendor_manual_matches or [])
-        if evidence.get("vendor_manual_matches"):
-            raw_vendor_matches.extend(evidence["vendor_manual_matches"])
-        if evidence.get("vendor_matches"):
-            raw_vendor_matches.extend(evidence["vendor_matches"])
-
-        raw_catalogs = []
-        if error_catalog:
-            raw_catalogs.append(error_catalog)
-        if evidence.get("error_catalog"):
-            raw_catalogs.append(evidence["error_catalog"])
-
-        for ec in raw_catalogs:
-            if isinstance(ec, list):
-                raw_vendor_matches.extend(ec)
-            elif isinstance(ec, dict):
-                if "errors" in ec and isinstance(ec["errors"], list):
-                    raw_vendor_matches.extend(ec["errors"])
-                else:
-                    for k, v in ec.items():
-                        _register_err(k)
-                        if isinstance(v, dict):
-                            _register_err(v.get("id"))
-                            _register_err(v.get("code"))
-
-        for vm in raw_vendor_matches:
-            if isinstance(vm, dict):
-                _register_err(vm.get("id"))
-                _register_err(vm.get("err_id"))
-                _register_err(vm.get("code"))
-                _register_err(vm.get("error_code"))
-                _register_err(vm.get("doc_chunk_id"))
-                _register_doc(vm.get("doc_chunk_id"))
-                _register_doc(vm.get("id"))
-                for a in vm.get("aliases", []):
-                    _register_err(a)
-                subsys = vm.get("subsystem") or vm.get("subsys")
-                code = vm.get("code") or vm.get("ecode") or vm.get("error_code")
-                if subsys is not None and code is not None:
-                    _register_err(f"err-subsys-{subsys}-code-{code}")
-                    _register_err(f"err-{subsys}-{code}")
-            elif isinstance(vm, str):
-                _register_err(vm)
 
         sources = sorted(evidence.get("sources", []))
         evidence_gaps = evidence.get("data_gaps", [])
@@ -312,25 +241,22 @@ class CitationAuditor:
             token = match.group(1).strip()
             if token in IGNORED_BRACKETS or token.startswith("GAP:"):
                 continue
-            # If it's a citation attempt (starts with ev-, drone-, source-, event-, ev_, doc-, err- or in known_events/docs/errs)
+            # Treat event and knowledge-base identifiers as citation attempts.
             if (
-                token.startswith(("ev-", "drone-", "source-", "event-", "ev_", "doc-", "err-"))
+                token.startswith(("ev-", "event-", "ev_", "doc-"))
+                or re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*-[A-Za-z0-9][A-Za-z0-9_.-]*", token)
                 or token in known_events
                 or token in known_docs
-                or token in known_errs
                 or HEX_EVENT_ID_REGEX.match(token)
             ):
                 candidate_cites.add(token)
 
         for cid in sorted(candidate_cites):
-            # Must be valid hex event ID in known_events, OR valid knowledge doc chunk/ID, OR valid error code
+            # Must be a retrieved telemetry event or knowledge-base document.
             if cid in known_events and (HEX_EVENT_ID_REGEX.match(cid) or cid.startswith("ev-span-") or cid.startswith("ev-")):
                 if cid not in valid_citations:
                     valid_citations.append(cid)
             elif cid in known_docs:
-                if cid not in valid_citations:
-                    valid_citations.append(cid)
-            elif cid in known_errs:
                 if cid not in valid_citations:
                     valid_citations.append(cid)
             else:
@@ -395,15 +321,15 @@ class CitationAuditor:
 
         for para in paragraphs_to_check:
             # Check if paragraph makes factual assertions
-            has_factual_content = any(
-                kw in para.lower() for kw in ("drone", "source", "event", "formation", "lidar", "manoeuvre", "collision", "timeout")
+            has_factual_content = bool(
+                re.search(r"\b(source|event|telemetry|component|device|system)\b", para, re.IGNORECASE)
             )
             para_citations = [cid for cid in valid_citations if f"[{cid}]" in para]
             if has_factual_content and not para_citations:
                 notes.append(f"OWASP AISVS 7.4.2 citation coverage warning: paragraph lacks citation: '{para[:60]}...'")
 
         # 1.4 Deterministic Entity-Binding Verification (<5 ms)
-        # Verify that the subsystem/drone named in each claim matches the cited event
+        # Verify that an explicitly named source matches the cited event.
         sentences = self._split_into_sentences(f"{summary_text} {likely_cause_text}")
         for sent in sentences:
             sent_cites = [cid for cid in valid_citations if f"[{cid}]" in sent]
@@ -411,25 +337,25 @@ class CitationAuditor:
                 ev = known_events.get(cid)
                 if ev is None:
                     continue
-                ev_src = ev["source_id"]  # e.g. 298
+                ev_src = ev["source_id"]
                 ev_name = ev.get("event_name") or ""
 
-                # Extract entities named in sentence (e.g. Drone 474, Drone 298)
-                drone_matches = re.findall(r"(?:drone|source|host)\s*([0-9]{1,6})", sent, re.IGNORECASE)
-                drone_entities = [int(d) for d in drone_matches]
+                source_matches = re.findall(
+                    r"(?:source|node|device|entity|agent|host|service|component|unit|process)\s*#?\s*([0-9]{1,10})",
+                    sent,
+                    re.IGNORECASE,
+                )
+                named_sources = [int(source) for source in source_matches]
 
-                # If sentence explicitly states 'Drone X reported/experienced [ev-cid]' where X != ev_src
-                # e.g. "Drone 474 reported LIDAR_TIMEOUT [ev-2e92ae032f03]" where ev-2e92ae032f03 is Drone 298
-                if drone_entities and ev_src not in drone_entities:
-                    # Check if the event's action is directly attributed to the wrong drone
+                if named_sources and ev_src not in named_sources:
                     # (Deceptive Grounding)
                     mismatch = {
                         "citation": cid,
-                        "claimed_entity": drone_entities[0],
+                        "claimed_entity": named_sources[0],
                         "actual_entity": ev_src,
                         "event_type": ev_name,
                         "claim_sentence": sent,
-                        "reason": f"Deceptive grounding: valid telemetry from source {ev_src} misattributed to source {drone_entities[0]}.",
+                        "reason": f"Valid telemetry from source {ev_src} was attributed to source {named_sources[0]}.",
                     }
                     entity_mismatches.append(mismatch)
                     tier1_passed = False
@@ -464,47 +390,12 @@ class CitationAuditor:
         atomic_claims = self._extract_atomic_claims(f"{summary_text} {likely_cause_text}", valid_citations)
         for claim in atomic_claims:
             for cid in claim["citations"]:
-                ev = known_events.get(cid)
-                if ev is None:
-                    continue
-                # Numeric fidelity check
-                numbers_in_claim = re.findall(r"\b([0-9]+(?:\.[0-9]+)?)\b", claim["claim_text"])
-                fields = ev.get("fields", {})
-
-                # Check if claim invents numbers contradictory to event fields
-                for num_str in numbers_in_claim:
-                    try:
-                        claim_num = float(num_str)
-                    except ValueError:
-                        continue
-                    # Ignore timestamps and entity IDs
-                    if claim_num in (ev["source_id"], float(ev.get("fields", {}).get("formation_id", -9999))):
-                        continue
-                    if claim_num > 10000000:
-                        continue  # likely timestamp
-
-                    # If claim mentions separation, check min_separation_m
-                    if "separation" in claim["claim_text"].lower() and "min_separation_m" in fields:
-                        actual_sep = float(fields["min_separation_m"])
-                        if abs(claim_num - actual_sep) > 0.05 and claim_num != actual_sep:
-                            fail = {
-                                "citation": cid,
-                                "claim": claim["claim_text"],
-                                "reason": f"Contradictory numeric claim: claimed {claim_num} m, but event recorded min_separation_m={actual_sep} m.",
-                            }
-                            entailment_failures.append(fail)
-
-                # Check state / code entailment
-                for status_val in ("SENSOR_DISCONNECTED", "INVALID_SCAN", "LIDAR_TIMEOUT"):
-                    if status_val in claim["claim_text"].upper():
-                        actual_status = str(fields.get("status_name", "")).upper()
-                        if actual_status and actual_status != status_val:
-                            fail = {
-                                "citation": cid,
-                                "claim": claim["claim_text"],
-                                "reason": f"Status contradiction: claim states '{status_val}', but event recorded '{actual_status}'.",
-                            }
-                            entailment_failures.append(fail)
+                if cid not in known_events and cid not in known_docs:
+                    entailment_failures.append({
+                        "citation": cid,
+                        "claim": claim["claim_text"],
+                        "reason": "Claim reference is not present in retrieved telemetry or knowledge_base documents.",
+                    })
 
         # =====================================================================
         # Tier 4 — ForceBench 5-Axis Evidence-Force Calibration
@@ -516,8 +407,12 @@ class CitationAuditor:
                 verb = causal_match.group(1)
                 is_hedged = bool(WARRANT_HEDGE_REGEX.search(sent))
                 # If causal claim spans multiple sources with unsynchronized clocks
-                drone_entities = re.findall(r"(?:drone|source|host)\s*([0-9]{1,6})", sent, re.IGNORECASE)
-                is_cross_source = len(set(drone_entities)) > 1 or len(sources) > 1
+                named_sources = re.findall(
+                    r"(?:source|node|device|entity|agent|host|service|component|unit|process)\s*#?\s*([0-9]{1,10})",
+                    sent,
+                    re.IGNORECASE,
+                )
+                is_cross_source = len(set(named_sources)) > 1 or len(sources) > 1
 
                 if is_cross_source and not is_hedged:
                     force_overclaims.append({
@@ -539,7 +434,7 @@ class CitationAuditor:
                     "detail": f"Uncalibrated modality marker '{term}' asserts absolute certainty on probabilistic telemetry.",
                 })
 
-        # Axis 3: Scope (fleet-wide generalization from isolated nodes)
+        # Axis 3: Scope (system-wide generalization from limited sources)
         for sent in sentences:
             scope_match = UNIVERSAL_SCOPE_REGEX.search(sent)
             if scope_match and not is_0_event and not is_insufficient:
@@ -548,7 +443,7 @@ class CitationAuditor:
                     "axis": "Scope",
                     "severity": "MEDIUM",
                     "claim": sent,
-                    "detail": f"Uncalibrated universal scope generalization '{term}' generalizes isolated telemetry to entire fleet.",
+                    "detail": f"Uncalibrated universal scope generalization '{term}' exceeds the retrieved telemetry scope.",
                 })
 
         # Axis 4: Temporal (cross-source order as hard fact despite clock skew)
@@ -679,7 +574,12 @@ class CitationAuditor:
             if len(sources) > 1 and not is_0_event:
                 unc = list(corrected.get("uncertainty") or [])
                 if not any("clock" in u.lower() for u in unc):
-                    unc.append(evidence.get("clock_caveat", "Producer clocks are not synchronized across sources."))
+                    unc.append(
+                        evidence.get(
+                            "clock_caveat",
+                            "Cross-source clock synchronization is unverified; timestamps alone do not establish order or causality.",
+                        )
+                    )
                 corrected["uncertainty"] = unc
 
         return ValidationReport(
@@ -758,8 +658,6 @@ def validate_synthesis(
     evidence: dict[str, Any],
     knowledge: list[dict[str, Any]] | dict[str, Any] | None = None,
     query: str = "",
-    vendor_manual_matches: list[dict[str, Any]] | None = None,
-    error_catalog: list[dict[str, Any]] | dict[str, Any] | None = None,
 ) -> ValidationReport:
     """Public validator entrypoint conforming to FSS specification."""
     return _default_auditor.audit(
@@ -767,8 +665,6 @@ def validate_synthesis(
         evidence,
         knowledge=knowledge,
         query=query,
-        vendor_manual_matches=vendor_manual_matches,
-        error_catalog=error_catalog,
     )
 
 

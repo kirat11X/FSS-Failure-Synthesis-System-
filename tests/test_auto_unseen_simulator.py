@@ -126,7 +126,6 @@ def test_strict_blind_isolation_never_in_llm_context() -> None:
         evidence=evidence,
         query=run_data["blind_query"],
         knowledge=[],
-        vendor_manual_matches=[],
     )
 
     # Ensure secret manifest text is not in LLM context

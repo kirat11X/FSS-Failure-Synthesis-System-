@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from bridge.citation_auditor import CitationAuditor, ValidationBadge, validate_synthesis
-from bridge.synthesizer import DOMAIN_KNOWLEDGE, deterministic_synthesize
+from bridge.synthesizer import deterministic_synthesize
 from fss_py.decoder import decode_all
 from fss_py.evidence import build_evidence
 from fss_py.schema import load_schema_file
@@ -62,7 +62,7 @@ class TestAdversarialCitations(unittest.TestCase):
                     "uncertainty": [],
                     "data_gaps": [],
                 }
-                report = self.auditor.audit(synth, self.evidence, knowledge=DOMAIN_KNOWLEDGE, auto_refine=False)
+                report = self.auditor.audit(synth, self.evidence, auto_refine=False)
                 self.assertFalse(report.is_accepted(), f"Fake ID [{fake_id}] was not rejected!")
                 self.assertIn(fake_id, report.invalid_citations)
                 self.assertEqual(report.badge, ValidationBadge.UNGROUNDED_HALLUCINATION)
@@ -86,7 +86,7 @@ class TestAdversarialCitations(unittest.TestCase):
             "uncertainty": [],
             "data_gaps": [],
         }
-        report1 = self.auditor.audit(synth_swap_1, self.evidence, knowledge=DOMAIN_KNOWLEDGE, auto_refine=False)
+        report1 = self.auditor.audit(synth_swap_1, self.evidence, auto_refine=False)
         self.assertEqual(report1.badge, ValidationBadge.ENTITY_MISMATCH)
         self.assertEqual(report1.verdict, "REJECTED")
         self.assertFalse(report1.is_accepted())
@@ -102,7 +102,7 @@ class TestAdversarialCitations(unittest.TestCase):
             "uncertainty": [],
             "data_gaps": [],
         }
-        report2 = self.auditor.audit(synth_swap_2, self.evidence, knowledge=DOMAIN_KNOWLEDGE, auto_refine=False)
+        report2 = self.auditor.audit(synth_swap_2, self.evidence, auto_refine=False)
         self.assertEqual(report2.badge, ValidationBadge.ENTITY_MISMATCH)
         self.assertEqual(report2.verdict, "REJECTED")
 
@@ -128,7 +128,7 @@ class TestAdversarialCitations(unittest.TestCase):
                     "uncertainty": [],
                     "data_gaps": [],
                 }
-                report = self.auditor.audit(synth, self.evidence, knowledge=DOMAIN_KNOWLEDGE, auto_refine=False)
+                report = self.auditor.audit(synth, self.evidence, auto_refine=False)
                 self.assertEqual(report.badge, ValidationBadge.FORCE_OVERCLAIM)
                 self.assertEqual(report.verdict, "REJECTED")
                 self.assertFalse(report.is_accepted())
@@ -136,8 +136,8 @@ class TestAdversarialCitations(unittest.TestCase):
 
     def test_04_calibrated_hedged_causal_claim_accepted(self):
         """Properly hedged causal claims ('plausibly let it drift', 'inferred') pass without FORCE_OVERCLAIM."""
-        hedged_synth = deterministic_synthesize(self.evidence, "Why did drone 474 leave formation?", DOMAIN_KNOWLEDGE)
-        report = self.auditor.audit(hedged_synth, self.evidence, knowledge=DOMAIN_KNOWLEDGE)
+        hedged_synth = deterministic_synthesize(self.evidence, "Why did drone 474 leave formation?", [])
+        report = self.auditor.audit(hedged_synth, self.evidence)
 
         self.assertEqual(report.badge, ValidationBadge.VERIFIED_SUPPORTED)
         self.assertEqual(report.verdict, "ACCEPTED")

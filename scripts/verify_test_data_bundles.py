@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
-"""scripts/verify_test_data_bundles.py
---------------------------------------
-Automated End-to-End Verification Across All 11 test_data_and_manuals Bundles.
+"""Automated end-to-end verification across the bundled telemetry datasets.
 
 Executes:
   1. Full backend pipeline on all 11 bundles (01 - 11):
@@ -9,15 +7,11 @@ Executes:
      - Verify time bounds (start_ns <= end_ns, realistic duration < 3600s, zero multi-year jumps).
      - Verify retrieved event count > 0.
      - Decode telemetry frames using appropriate schema (drone, microservices, can, plc, warehouse, hft).
-     - Digest vendor error manual via bridge/error_catalog.py.
-     - Match error rules via bridge/hybrid_rag.enrich_evidence_with_manual.
-     - Assert matched rules >= 1 for bundles 01-08, 10, 11 (never 0 matched).
+     - Retrieve optional domain context exclusively from knowledge_base/.
      - Assert Stage 0 Sufficiency Gate triggers INSUFFICIENT_EVIDENCE / Quarantine for bundle 09.
      - Assert UNKNOWN_EVENT_TYPE and zero payload leak for bundles 04 (0x0499) and 07 (0x007F).
   2. Live Playwright UI verification on http://127.0.0.1:8501:
-     - Real-life bundle test: 01_real_ardupilot_log171 (log171.bin + ardupilot_corp_errors.md)
-     - Custom bundle test: 06_custom_drone_swarm_298_474 (swarm_298_474_opaque.fss.bin + aerodrone_inc_manual.md)
-     - Assert matched rules > 0, clean CRT rendering, zero console/Streamlit exceptions.
+     - Upload a telemetry binary and assert clean rendering with zero Streamlit exceptions.
      - Save screenshot to artifacts.
   3. Outputs a clean Markdown verification summary table.
 """
@@ -37,10 +31,9 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from bridge.error_catalog import parse_error_manual
-from bridge.hybrid_rag import enrich_evidence_with_manual
 from bridge.java_retriever import JavaRetriever
 from bridge.sufficiency_gate import SufficiencyStatus, evaluate_evidence_sufficiency
+from bridge.synthesizer import retrieve_relevant_knowledge
 from fss_py.decoder import decode_all
 from fss_py.evidence import build_evidence
 from fss_py.model import ALL, DecodeStatus
@@ -68,11 +61,9 @@ class BundleVerificationResult:
     bundle_id: str
     bundle_name: str
     binary_file: str
-    manual_file: str
-    manual_format: str
     events_count: int
     duration_s: float
-    matched_rules: int
+    knowledge_documents: int
     verdict: str
     status: str
     error: str | None = None
@@ -88,19 +79,6 @@ def verify_backend_bundle(bundle_dir: Path) -> BundleVerificationResult:
     if not bin_files:
         raise FileNotFoundError(f"No binary/store file found in {bundle_dir}")
     bin_file = bin_files[0]
-
-    manual_files = [
-        f for f in bundle_dir.iterdir()
-        if f.name != "TEST_GUIDE.txt" and f.suffix in (".md", ".txt", ".json", ".csv")
-    ]
-    if not manual_files:
-        raise FileNotFoundError(f"No manual file found in {bundle_dir}")
-    manual_file = manual_files[0]
-
-    manual_bytes = manual_file.read_bytes()
-    catalog = parse_error_manual(manual_bytes, manual_file.name, vendor="auto")
-    if len(catalog) == 0:
-        raise AssertionError(f"Catalog parsed 0 entries from {manual_file.name}")
 
     with tempfile.TemporaryDirectory() as td:
         if bin_file.suffix == ".dat":
@@ -143,9 +121,15 @@ def verify_backend_bundle(bundle_dir: Path) -> BundleVerificationResult:
         assert len(res.events) > 0, f"Zero events retrieved from {bin_file.name}"
 
         decoded = decode_all(res.events, schema)
-        evidence = build_evidence(decoded)
-        matched = enrich_evidence_with_manual(evidence, catalog)
-        matched_count = len(matched)
+        query = "Summarize the retrieved telemetry and its data gaps."
+        evidence = build_evidence(decoded, query=query)
+        knowledge = retrieve_relevant_knowledge(evidence, query)
+        if any(
+            document.get("domain") != "knowledge_base"
+            or not document.get("source_filename")
+            for document in knowledge
+        ):
+            raise AssertionError("Retrieved domain context must originate from knowledge_base/.")
 
         # Bundle-specific assertions
         verdict = "VERIFIED_SUPPORTED"
@@ -158,12 +142,6 @@ def verify_backend_bundle(bundle_dir: Path) -> BundleVerificationResult:
                 f"Expected INSUFFICIENT_EVIDENCE, got {suff.status}"
             )
             verdict = "INSUFFICIENT_EVIDENCE (QUARANTINED)"
-        else:
-            # All other bundles MUST have >= 1 matched error rule
-            assert matched_count >= 1, (
-                f"Bundle {b_id} matched 0 rules! Expected >= 1 matched rule."
-            )
-
         if b_id == "04":
             # CAN bus must decode 0x0499 as UNKNOWN_EVENT_TYPE with 0 leaked payload fields
             unknown_can = [d for d in decoded if d.event_type == 0x0499]
@@ -186,11 +164,9 @@ def verify_backend_bundle(bundle_dir: Path) -> BundleVerificationResult:
             bundle_id=b_id,
             bundle_name=bundle_dir.name,
             binary_file=bin_file.name,
-            manual_file=manual_file.name,
-            manual_format=manual_file.suffix.lstrip(".").upper(),
             events_count=len(res.events),
             duration_s=round(duration_s, 1),
-            matched_rules=matched_count,
+            knowledge_documents=len(knowledge),
             verdict=verdict,
             status="PASS",
         )
@@ -229,20 +205,13 @@ def run():
         time.sleep(1.0)
         print('  UI loaded successfully.')
 
-        # Test 1: Upload Real-Life Bundle 01 (log171.bin + ardupilot_corp_errors.md)
+        # Upload a telemetry file; reference documents are loaded only from knowledge_base/.
         bin_01 = ROOT / 'test_data_and_manuals' / '01_real_ardupilot_log171' / 'log171.bin'
-        man_01 = ROOT / 'test_data_and_manuals' / '01_real_ardupilot_log171' / 'ardupilot_corp_errors.md'
-        print(f'  [Playwright Test 1] Uploading {bin_01.name} and {man_01.name}...')
+        print(f'  [Playwright] Uploading {bin_01.name}...')
 
         file_inputs = page.locator('input[type="file"]')
         file_inputs.first.set_input_files(str(bin_01))
         time.sleep(2.0)
-        if file_inputs.count() > 1:
-            file_inputs.nth(1).set_input_files(str(man_01))
-        time.sleep(2.0)
-
-        page.wait_for_selector('.crt-status-indicator >> text=ARDUPILOT', timeout=25000)
-        print('  --> ArduPilot badge detected.')
 
         # Click analyze button
         analyze_btn = page.locator('button:has-text("Analyze Log"), button:has-text("⚡ Analyze Log")').first
@@ -285,7 +254,7 @@ if __name__ == '__main__':
 
 def main() -> None:
     print("================================================================================")
-    print("  VERIFYING TEST_DATA_AND_MANUALS BUNDLES (01 - 11)")
+    print("  VERIFYING TELEMETRY DATA BUNDLES (01 - 11)")
     print("================================================================================")
 
     root = PROJECT_ROOT / "test_data_and_manuals"
@@ -299,17 +268,15 @@ def main() -> None:
         try:
             res = verify_backend_bundle(b)
             results.append(res)
-            print(f"    [PASS] events={res.events_count}, duration={res.duration_s}s, matched_rules={res.matched_rules}, verdict={res.verdict}")
+            print(f"    [PASS] events={res.events_count}, duration={res.duration_s}s, knowledge_docs={res.knowledge_documents}, verdict={res.verdict}")
         except Exception as e:
             res = BundleVerificationResult(
                 bundle_id=b.name[:2],
                 bundle_name=b.name,
                 binary_file="",
-                manual_file="",
-                manual_format="",
                 events_count=0,
                 duration_s=0.0,
-                matched_rules=0,
+                knowledge_documents=0,
                 verdict="ERROR",
                 status="FAIL",
                 error=str(e),
@@ -324,10 +291,10 @@ def main() -> None:
     print("\n================================================================================")
     print("  FINAL 11-BUNDLE VERIFICATION MATRIX")
     print("================================================================================")
-    print("| Bundle | Telemetry Binary | Manual Format | Events | Duration | Matched Rules | Verdict | Status |")
+    print("| Bundle | Telemetry Binary | Events | Duration | KB Documents | Verdict | Status |")
     print("|---|---|---|---|---|---|---|---|")
     for r in results:
-        print(f"| {r.bundle_id} {r.bundle_name[3:]} | `{r.binary_file}` | {r.manual_format} | {r.events_count} | {r.duration_s}s | {r.matched_rules} | {r.verdict} | **{r.status}** |")
+        print(f"| {r.bundle_id} {r.bundle_name[3:]} | `{r.binary_file}` | {r.events_count} | {r.duration_s}s | {r.knowledge_documents} | {r.verdict} | **{r.status}** |")
     print("================================================================================\n")
 
     failed = [r for r in results if r.status != "PASS"]

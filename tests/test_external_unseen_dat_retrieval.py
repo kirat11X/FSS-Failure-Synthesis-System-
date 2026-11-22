@@ -20,7 +20,6 @@ import pytest
 
 from fss_py.decoder import decode_all
 from fss_py.evidence import build_evidence
-from bridge.error_catalog import load_builtin_manual
 from bridge.java_retriever import (
     JavaReceipt,
     JavaRetriever,
@@ -222,11 +221,9 @@ def test_stage_2_handoff_and_synthesis_isolation(tmp_path: Path):
     assert len(decoded_events) == len(wire_records)
 
     evidence = build_evidence(decoded_events, query="Diagnose mission telemetry anomalies")
-    manual_entries = load_builtin_manual("fss_native")
     synthesis, report, model_tier = synthesize_and_validate(
         evidence=evidence,
         query="Diagnose mission telemetry anomalies",
-        vendor_manual_matches=[e.to_dict() if hasattr(e, "to_dict") else e for e in manual_entries],
     )
 
     assert synthesis is not None

@@ -5,14 +5,11 @@ Prints:
   1. Total ingested events, min/max timestamps, and exact duration in seconds/minutes.
   2. Total retrieved events in Full Dataset mode via Java BlockStore IPC.
   3. All decoded ERR events (subsystem_code, error_code) — verifying zero None values.
-  4. Count of matched ardupilot_error_codes.md rules (> 0).
-  5. Post-compaction event count at num_ctx=16384 (100–220 events, not 7).
+  4. Post-compaction event count at num_ctx=16384.
 """
 
 from __future__ import annotations
 
-import json
-import struct
 import tempfile
 from pathlib import Path
 
@@ -20,11 +17,6 @@ from fss_py.decoder import decode_all
 from fss_py.schema import load_schema_file
 from fss_py.wire import iter_envelopes
 
-from bridge.bin_ingestor import BinCacheManager
-from bridge.error_catalog import (
-    enrich_evidence_with_manual,
-    load_builtin_manual,
-)
 from bridge.java_retriever import ALL, JavaRetriever
 from bridge.synthesizer import (
     build_llm_context,
@@ -87,20 +79,8 @@ def main():
         assert sub is not None, f"subsystem_code is None in {e}!"
         assert err is not None, f"error_code is None in {e}!"
 
-    # 4. Error-Manual Matching
-    catalog = load_builtin_manual("ardupilot")
     ev_dicts = [e.to_dict() for e in decoded]
-    matched = enrich_evidence_with_manual({"events": ev_dicts}, catalog)
-    print(f"\n[4. ArduPilot Error-Manual Matching]")
-    print(f"  Loaded Rules in Manual: {len(catalog)}")
-    print(f"  Matched Rules: {len(matched)}")
-    for m in matched:
-        print(f"  - [{m.get('vendor', 'ardupilot').upper()}] {m.get('error_code')}: {m.get('title')} (Subsystem: {m.get('subsystem')})")
-    assert len(matched) > 0, "Expected > 0 matched error-manual rules!"
-    matched_str = " ".join(m.get("title", "") for m in matched).upper()
-    assert "LIDAR_TIMEOUT" not in matched_str, "Spurious LIDAR_TIMEOUT found in matched rules!"
-
-    # 5. Token Budget Compaction at num_ctx=16384
+    # 4. Token Budget Compaction
     evidence = {
         "events": ev_dicts[:1671],
         "retrieval": {"returned": len(ev_dicts[:1671])},
@@ -114,7 +94,7 @@ def main():
         enable_thinking=False,
     )
     post_count = len(compacted["events"])
-    print(f"\n[5. Token Budget Compaction at num_ctx=16384]")
+    print(f"\n[4. Token Budget Compaction at num_ctx=16384]")
     print(f"  Initial Events: {len(evidence['events']):,}")
     print(f"  Compacted Events: {post_count}")
     print(f"  Compacted Warning: {w_msg}")

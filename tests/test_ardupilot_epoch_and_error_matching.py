@@ -1,7 +1,4 @@
-"""Regression test suite for unified ArduPilot epoch conversion, ERR/EV decoding,
-
-error manual matching, and context token budget compaction.
-"""
+"""Regression tests for epoch conversion, event decoding, and context budgeting."""
 
 from __future__ import annotations
 
@@ -13,11 +10,6 @@ from fss_py.decoder import decode_all
 from fss_py.schema import load_schema_file
 from fss_py.wire import iter_envelopes
 
-from bridge.error_catalog import (
-    enrich_evidence_with_manual,
-    extract_error_codes_from_events,
-    load_builtin_manual,
-)
 from bridge.synthesizer import (
     build_llm_context,
     estimate_tokens,
@@ -93,32 +85,6 @@ def test_err_ev_mode_msg_decoding(converted_log171):
     subsystem_codes = {e.fields.get("subsystem_code") for e in err_events}
     for expected_ev_id in (8, 10, 15, 25, 28):
         assert expected_ev_id in subsystem_codes, f"Event ID {expected_ev_id} missing from decoded events!"
-
-
-def test_ardupilot_error_manual_matching(converted_log171):
-    """Verify that decoded ERROR_EVENT records match ArduPilot error catalog with zero LIDAR_TIMEOUT citations."""
-    out_fss, _ = converted_log171
-    raw_data = out_fss.read_bytes()
-    records = list(iter_envelopes(raw_data))
-
-    schema_reg = load_schema_file(str(PROJECT_ROOT / "schemas" / "drone_v0.yaml"))
-    decoded_events = decode_all(records, schema_reg)
-    ev_dicts = [e.to_dict() for e in decoded_events]
-
-    catalog = load_builtin_manual("ardupilot")
-    assert len(catalog) > 0, "Failed to load ArduPilot builtin manual"
-
-    matched_rules = enrich_evidence_with_manual({"events": ev_dicts}, catalog)
-    assert len(matched_rules) > 0, "Expected > 0 matched error-manual rules for log171.bin!"
-
-    matched_codes = {m["error_code"] for m in matched_rules}
-    assert "SUBSYS_16_ECODE_2" in matched_codes, "Failed to match SUBSYS_16_ECODE_2 (EKF Failsafe)"
-    assert "SUBSYS_16_ECODE_0" in matched_codes, "Failed to match SUBSYS_16_ECODE_0 (EKF Cleared)"
-    assert "EV_28" in matched_codes or "SUBSYS_28_ECODE_0" in matched_codes
-
-    # Ensure zero spurious LIDAR_TIMEOUT citations for ArduPilot flight
-    matched_titles = " ".join(m.get("title", "") for m in matched_rules).upper()
-    assert "LIDAR_TIMEOUT" not in matched_titles, "Spurious LIDAR_TIMEOUT matched in ArduPilot catalog!"
 
 
 def test_num_ctx_16384_sane_compaction():

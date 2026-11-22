@@ -47,7 +47,6 @@ from bridge.citation_auditor import (
     ValidationReport,
     validate_synthesis,
 )
-from bridge.error_catalog import VendorErrorEntry, parse_error_manual
 from bridge.hybrid_rag import HybridRetriever
 from bridge.java_retriever import JavaRetriever
 from bridge.uds_retriever import UdsJavaRetriever
@@ -59,7 +58,6 @@ from fss_py.wire import encode_envelope, iter_envelopes
 
 SCHEMAS_DIR = ROOT_DIR / "schemas"
 FIXTURES_DIR = ROOT_DIR / "fixtures" / "golden"
-MANUALS_DIR = ROOT_DIR / "domain_manuals"
 
 
 # ==============================================================================
@@ -533,12 +531,8 @@ def evaluate_forcebench() -> ForceBenchSummary:
 # ==============================================================================
 
 def evaluate_hybrid_rag() -> RagMetrics:
-    """Benchmark Hybrid RAG retrieval precision and recall over domain manuals."""
-    entries: list[VendorErrorEntry] = []
-    for p in sorted(MANUALS_DIR.glob("*_error_codes.md")):
-        entries.extend(parse_error_manual(p.read_text(encoding="utf-8"), filename=p.name))
-
-    retriever = HybridRetriever(vendor_entries=entries)
+    """Benchmark Hybrid RAG retrieval over the repository knowledge base."""
+    retriever = HybridRetriever.get_instance()
 
     test_queries = [
         ("504 gateway timeout database pool exhausted", ["POOL_EXHAUSTED", "GATEWAY_TIMEOUT", "TIMEOUT"]),

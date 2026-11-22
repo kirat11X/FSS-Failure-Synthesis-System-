@@ -5,7 +5,7 @@ from pathlib import Path
 import pypdf
 from docx import Document
 
-from bridge import hybrid_rag, knowledge_base
+from bridge import knowledge_base
 from bridge.knowledge_base import load_knowledge_base
 from bridge.synthesizer import build_llm_context, retrieve_relevant_knowledge
 
@@ -93,17 +93,7 @@ def test_knowledge_base_is_auto_indexed_and_retrievable_as_prompt_context(
         "Quasar gyroscope drift requires recalibration after a cold start.",
         encoding="utf-8",
     )
-    load = knowledge_base.load_knowledge_base
-    fingerprint = knowledge_base.knowledge_base_fingerprint
-    monkeypatch.setattr(
-        knowledge_base, "load_knowledge_base", lambda: load(tmp_path)
-    )
-    monkeypatch.setattr(
-        knowledge_base,
-        "knowledge_base_fingerprint",
-        lambda: fingerprint(tmp_path),
-    )
-    monkeypatch.setattr(hybrid_rag, "load_builtin_manual", lambda _vendor: [])
+    monkeypatch.setattr(knowledge_base, "KNOWLEDGE_BASE_DIR", tmp_path)
     monkeypatch.setattr(HybridRetriever, "_instance", None)
     monkeypatch.setattr(HybridRetriever, "_knowledge_base_fingerprint", None)
 

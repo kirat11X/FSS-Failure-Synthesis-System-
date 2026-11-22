@@ -4,10 +4,10 @@ Connects to:
   1. Local Ollama server (native /api/chat with OLLAMA_CONTEXT_LENGTH >= 16384, Qwen3 sampling).
   2. Local llama-server (--ctx-size >= 16384, prefix caching, Pydantic GBNF / json_schema).
   3. Local HuggingFace weights (with do_sample=True for transformers >= 4.46).
-  4. Hybrid RAG (bm25s + Dense + RRF + Reranker) and Historical RCA Incidents (RCACopilot CoT).
+  4. Knowledge-base retrieval (BM25S + dense embeddings + reciprocal-rank fusion).
   5. Pre-flight Python token-budget guard enforcing num_ctx >= 16384 with deterministic compaction.
   6. Qwen3 Thinking Mode stability & bounded think-budget guard (closing token 151668 / <|im_end|> 151645).
-  7. Offline deterministic reasoning synthesizer matching streamlit_app.py and FSS golden rules.
+  7. Offline deterministic synthesis that reports telemetry without inventing causal explanations.
 
 Validates syntheses strictly against cited event IDs and evidence data gaps.
 """
@@ -33,13 +33,7 @@ if str(ROOT_DIR) not in sys.path:
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
 from bridge.bin_ingestor import is_critical_event
-from bridge.hybrid_rag import (
-    DOMAIN_KNOWLEDGE,
-    HistoricalIncident,
-    format_exemplars_cot,
-    retrieve_historical_exemplars,
-    retrieve_hybrid_knowledge,
-)
+from bridge.hybrid_rag import retrieve_hybrid_knowledge
 from bridge.citation_auditor import (
     CitationAuditor,
     ValidationBadge,
@@ -141,38 +135,25 @@ DEFAULT_THINKING_BUDGET = 1024
 RESERVED_OUTPUT_TOKENS_THINKING = 3200
 RESERVED_OUTPUT_TOKENS_NON_THINKING = 1200
 
-# (event_name, field, value) -> (severity, plain-language problem)
-RULES: dict[tuple[str, str, str], tuple[str, str]] = {
-    ("LIDAR_STATUS", "status_name", "LIDAR_TIMEOUT"): ("high", "LiDAR timed out"),
-    ("LIDAR_STATUS", "status_name", "SENSOR_DISCONNECTED"): ("high", "LiDAR sensor disconnected"),
-    ("LIDAR_STATUS", "status_name", "INVALID_SCAN"): ("medium", "LiDAR returned an invalid scan"),
-    ("DIAGNOSTIC", "status_name", "FAULT"): ("high", "Diagnostics report FAULT"),
-    ("DIAGNOSTIC", "status_name", "DEGRADED"): ("medium", "Diagnostics report DEGRADED"),
-    ("FORMATION_STATE", "state", "LEFT_FORMATION"): ("high", "Left formation"),
-    ("FORMATION_STATE", "state", "REJOINING"): ("low", "Rejoining formation"),
-}
-
 # System prompt is byte-identical across queries for host-memory prefix caching
 # (llama-server --cram 256 --system-prompt-file ... --cache-prompt --cache-type-k q8_0)
-SYSTEM_PROMPT = """You are the Failure Synthesis System for distributed autonomous systems.
+SYSTEM_PROMPT = """You are a telemetry investigation assistant.
 You receive an evidence JSON (format fss-evidence/v0) and an operator query.
 
 STRICT CONTRACT RULES:
-1. Grounding: Reason solely over facts in the evidence, digested vendor error manuals, and provided domain knowledge.
-2. Citation: Cite every factual claim with its exact event ID [ev-...], vendor error manual ID [err-...], or domain knowledge reference [doc-...] in square brackets.
-3. Accuracy: ONLY cite event IDs, vendor error IDs, and document IDs that exist in the evidence and knowledge context. Never hallucinate an ID.
-4. Clock Caveat: Producer clocks are NOT synchronized across sources. Never state cross-source order or causality as fact; state it as inferred or plausible.
-5. Data Gaps: Any unknown or opaque data listed under data_gaps must be explicitly reported as unknown. Never guess payload bytes.
+1. Grounding: Use retrieved telemetry for situation-specific claims and only the retrieved knowledge_base documents for domain explanations. Do not rely on outside knowledge.
+2. Citation: Cite factual claims with event IDs [ev-...] or retrieved knowledge document IDs [doc-...].
+3. Accuracy: Only cite IDs present in the telemetry or retrieved knowledge context. Never invent identifiers, events, or field meanings.
+4. Clock Caveat: Producer clocks may differ. Do not state cross-source order or causality as fact unless evidence establishes it.
+5. Data Gaps: Report undecoded or opaque data as unknown. Never guess payload bytes.
 6. Format: Output valid JSON adhering to the FailureSynthesis schema:
 {
-  "summary": "1-3 sentences answering the operator question with [ev-...], [err-...], or [doc-...] citations",
-  "likely_cause": "Root cause explanation citing contributing event_ids [ev-...] and error runbooks [err-...], or null if nominal",
+  "summary": "1-3 sentences answering the operator question with supported citations",
+  "likely_cause": "Evidence-supported explanation or null when unsupported",
   "confidence": "low" | "medium" | "high",
-  "contributing_events": [
-    {"source_id": 298, "timestamp": 1791454023050000000, "event_type": "LIDAR_STATUS", "event_id": "ev-2e92ae032f03"}
-  ],
-  "uncertainty": ["Clock unsynchronized caveat", "..."],
-  "data_gaps": ["Event ev-9d2fbc08bffc: 8 payload bytes were not decoded..."],
+  "contributing_events": [],
+  "uncertainty": [],
+  "data_gaps": [],
   "reasoning_truncated": false
 }"""
 
@@ -440,8 +421,6 @@ def preflight_budget_guard(
     knowledge: list[dict[str, Any]],
     effective_num_ctx: int = DEFAULT_NUM_CTX,
     enable_thinking: bool = False,
-    exemplars: Sequence[HistoricalIncident] | None = None,
-    vendor_manual_matches: list[dict[str, Any]] | None = None,
     include_event_ids: bool = True,
 ) -> tuple[dict[str, Any], bool, str]:
     """Pre-flight Python token-budget guard.
@@ -459,10 +438,8 @@ def preflight_budget_guard(
         evidence,
         query,
         knowledge,
-        exemplars=exemplars,
         effective_num_ctx=effective_num_ctx,
         _skip_budget_guard=True,
-        vendor_manual_matches=vendor_manual_matches,
         include_event_ids=include_event_ids,
     )
     est_prompt_tokens = estimate_tokens(SYSTEM_PROMPT) + estimate_tokens(test_context)
@@ -477,36 +454,11 @@ def preflight_budget_guard(
         warnings.warn(msg, UserWarning, stacklevel=2)
         return evidence, False, msg
 
-    # Identify anomalies, faults, errors, and state transitions that MUST be preserved
+    # Preserve telemetry that the generic event classifier marks as noteworthy.
     anomalous_indices = set()
     for idx, ev in enumerate(all_events):
-        name = str(ev.get("event_name") or ev.get("event_type") or "").upper()
-        status = str(ev.get("decode_status") or "").upper()
-        fields = ev.get("fields", {}) or {}
-
-        if status and status not in ("SUCCESS", "DECODED"):
+        if is_critical_event(ev):
             anomalous_indices.add(idx)
-            continue
-        if any(kw in name for kw in ("AVOID", "LEFT_FORMATION", "ERROR", "ERR", "EV", "FAULT", "WARN", "FAIL", "ALARM")):
-            anomalous_indices.add(idx)
-            continue
-        for k, v in fields.items():
-            k_lower = k.lower()
-            if any(term in k_lower for term in ("error_code", "ecode", "fault_code", "reason_code", "timeout_count")):
-                if isinstance(v, (int, float)) and v > 0:
-                    anomalous_indices.add(idx)
-                    break
-            elif k_lower == "state_code" and isinstance(v, (int, float)) and v > 0:
-                anomalous_indices.add(idx)
-                break
-            elif k_lower in ("status_name", "reason", "detail", "state") and isinstance(v, str):
-                if any(term in v.upper() for term in ("FAIL", "ERROR", "TIMEOUT", "DEGRADED", "COLLISION", "LEFT_FORMATION", "EMERGENCY")):
-                    anomalous_indices.add(idx)
-                    break
-        for (r_name, key, val), _ in RULES.items():
-            if name == r_name and fields.get(key) == val:
-                anomalous_indices.add(idx)
-                break
 
     # Realistic available event token budget computation:
     # available = num_ctx - system_tokens - rag_tokens - reserved_output - safety_margin
@@ -556,10 +508,8 @@ def preflight_budget_guard(
         compacted_evidence,
         query,
         knowledge,
-        exemplars=exemplars,
         effective_num_ctx=effective_num_ctx,
         _skip_budget_guard=True,
-        vendor_manual_matches=vendor_manual_matches,
         include_event_ids=include_event_ids,
     )
     est_prompt_tokens2 = estimate_tokens(SYSTEM_PROMPT) + estimate_tokens(test_context2)
@@ -578,10 +528,8 @@ def preflight_budget_guard(
             compacted_evidence,
             query,
             knowledge,
-            exemplars=exemplars,
             effective_num_ctx=effective_num_ctx,
             _skip_budget_guard=True,
-            vendor_manual_matches=vendor_manual_matches,
             include_event_ids=include_event_ids,
         )
         est_prompt_tokens2 = estimate_tokens(SYSTEM_PROMPT) + estimate_tokens(test_context2)
@@ -630,26 +578,20 @@ def build_llm_context(
     evidence: dict[str, Any],
     query: str,
     knowledge: list[dict[str, Any]],
-    exemplars: Sequence[HistoricalIncident] | None = None,
     effective_num_ctx: int = DEFAULT_NUM_CTX,
     enable_thinking: bool = False,
     _skip_budget_guard: bool = False,
-    vendor_manual_matches: list[dict[str, Any]] | None = None,
     include_event_ids: bool = True,
 ) -> str:
-    """Format prompt context with context budgeting, vendor manual matches, and RCACopilot exemplars."""
-    # Apply preflight budget guard if not skipped
-    was_compacted = False
+    """Format query, retrieved telemetry, knowledge-base documents, and data gaps."""
     guard_warning = ""
     if not _skip_budget_guard:
-        evidence, was_compacted, guard_warning = preflight_budget_guard(
+        evidence, _, guard_warning = preflight_budget_guard(
             evidence,
             query,
             knowledge,
             effective_num_ctx=effective_num_ctx,
             enable_thinking=enable_thinking,
-            exemplars=exemplars,
-            vendor_manual_matches=vendor_manual_matches,
             include_event_ids=include_event_ids,
         )
 
@@ -657,19 +599,6 @@ def build_llm_context(
     sources = evidence.get("sources", [])
     clock_caveat = evidence.get("clock_caveat")
     all_events = evidence.get("events", [])
-
-    # Collect and normalize vendor manual error matches
-    all_vendor_matches = list(vendor_manual_matches or [])
-    if evidence.get("vendor_manual_matches"):
-        all_vendor_matches.extend(evidence["vendor_manual_matches"])
-    if evidence.get("vendor_matches"):
-        all_vendor_matches.extend(evidence["vendor_matches"])
-    if evidence.get("error_catalog"):
-        ec = evidence["error_catalog"]
-        if isinstance(ec, list):
-            all_vendor_matches.extend(ec)
-        elif isinstance(ec, dict) and "errors" in ec:
-            all_vendor_matches.extend(ec["errors"])
 
     lines = [
         "=== USER QUERY ===",
@@ -681,20 +610,13 @@ def build_llm_context(
         lines.append(f"⚠️ [PRE-FLIGHT BUDGET GUARD] {guard_warning}")
         lines.append("")
 
-    # Historical Incidents Exemplars (RCACopilot Few-Shot CoT)
-    if exemplars:
-        lines.append(format_exemplars_cot(exemplars))
-
-    # ---------------------------------------------------------------------------
-    # 1. Condensed Full-Log Telemetry & Extracted Fault Events ([ev-...])
-    # ---------------------------------------------------------------------------
     event_citation_note = (
         "cite with [ev-...]"
         if include_event_ids
         else "cite with source_id, timestamp_ns, and numeric event_type"
     )
     lines.extend([
-        "### 1. CONDENSED FULL-LOG TELEMETRY & EXTRACTED FAULT EVENTS",
+        "### RETRIEVED TELEMETRY",
         f"Retrieval: source={retrieval.get('source', 'ALL')}, inclusive window "
         f"[{retrieval.get('t_start_ns', 0)}, {retrieval.get('t_end_ns', 0)}] ns, "
         f"max_records={retrieval.get('max_events', 100)}, "
@@ -748,45 +670,13 @@ def build_llm_context(
         lines.append("No events recorded or retrieved in the requested time window.")
 
     lines.append("")
-
-    # ---------------------------------------------------------------------------
-    # 2. Digested Vendor Error-Code Manual Matches & Domain RAG Knowledge ([doc-...] / [err-...])
-    # ---------------------------------------------------------------------------
-    lines.append("### 2. DIGESTED VENDOR ERROR-CODE MANUAL MATCHES & RUNBOOKS")
-
-    # Injected Vendor Error-Code Manual Matches
-    if all_vendor_matches:
-        lines.append("Vendor Error-Code Manual Matches (cite with [err-...]):")
-        for vm in all_vendor_matches:
-            # Stable citation ID
-            err_id = vm.get("id") or vm.get("err_id") or vm.get("code") or "err-match"
-            if not str(err_id).startswith(("err-", "doc-")):
-                err_id = f"err-{err_id}"
-            title = vm.get("title") or vm.get("name") or "Vendor Error Code Match"
-            subsys = vm.get("subsystem") or vm.get("subsys") or ""
-            code = vm.get("code") or vm.get("ecode") or ""
-            desc = vm.get("description") or vm.get("detail") or vm.get("content") or ""
-            remedy = vm.get("remedy") or vm.get("runbook") or vm.get("action") or ""
-
-            lines.append(f'<vendor_error id="{err_id}" title="{title}" subsystem="{subsys}" code="{code}">')
-            if desc:
-                lines.append(f"| Description: {desc}")
-            if remedy:
-                lines.append(f"| Runbook/Action: {remedy}")
-            lines.append("</vendor_error>")
-    else:
-        lines.append("(No vendor error-code manual matches observed in this telemetry segment)")
-
-    lines.append("")
-    lines.append("Domain RAG Knowledge Chunks (cite with [doc-...]):")
+    lines.append("### RETRIEVED KNOWLEDGE_BASE DOCUMENTS")
     knowledge_chunks = knowledge[:8]
     if knowledge_chunks:
         for doc in knowledge_chunks:
-            doc_id = doc.get("id") or doc.get("chunk") or "doc-unknown"
-            if not str(doc_id).startswith(("doc-", "err-")) and not str(doc_id).startswith("d1_"):
-                doc_id = f"doc-{doc_id}"
+            doc_id = doc.get("id") or doc.get("chunk")
             lines.append(
-                f'<document id="{doc.get("id")}" cite_id="{doc_id}" chunk="{doc.get("chunk")}" '
+                f'<document id="{doc_id}" chunk="{doc.get("chunk")}" '
                 f'kind="{doc.get("kind")}" domain="{doc.get("domain")}" '
                 f'title="{doc.get("title")}" source_filename="{doc.get("source_filename", "")}" '
                 f'section="{doc.get("section", "")}" page_number="{doc.get("page_number", "")}" '
@@ -796,14 +686,10 @@ def build_llm_context(
                 lines.append(f"| {line}")
             lines.append("</document>")
     else:
-        lines.append("(No additional domain knowledge chunks matched)")
+        lines.append("(No knowledge_base documents matched)")
 
     lines.append("")
-
-    # ---------------------------------------------------------------------------
-    # 3. Detected Data Gaps (if any)
-    # ---------------------------------------------------------------------------
-    lines.append("### 3. DETECTED DATA GAPS & DECODING WARNINGS")
+    lines.append("### DATA GAPS AND DECODING WARNINGS")
     gaps = evidence.get("data_gaps", [])
     if gaps:
         for g in gaps:
@@ -813,7 +699,7 @@ def build_llm_context(
                 detail = re.sub(r"\bev-[0-9a-f]{12}\b", "", detail)
             lines.append(f"- [{g.get('kind', 'GAP')}] {detail}")
     else:
-        lines.append("None: all events decoded without gaps.")
+        lines.append("None reported.")
 
     return "\n".join(lines)
 
@@ -1072,24 +958,13 @@ def deterministic_synthesize(
     evidence: dict[str, Any],
     query: str,
     knowledge: list[dict[str, Any]],
-    vendor_manual_matches: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Offline deterministic rule-based failure synthesizer matching golden FSS rules."""
+    """Produce a conservative summary without inferring domain-specific causes."""
     events = evidence.get("events", [])
-    sources = evidence.get("sources", [])
-    gaps = evidence.get("data_gaps", [])
-
-    # Normalize vendor manual matches
-    v_matches = list(vendor_manual_matches or [])
-    if evidence.get("vendor_manual_matches"):
-        v_matches.extend(evidence["vendor_manual_matches"])
-    if evidence.get("vendor_matches"):
-        v_matches.extend(evidence["vendor_matches"])
-
     data_gap_summaries = []
-    for g in gaps:
-        eid_str = f"Event {g['event_id']}: " if g.get("event_id") else (f"[{g.get('kind')}] " if g.get("kind") else "")
-        data_gap_summaries.append(f"{eid_str}{g.get('detail', '')}")
+    for gap in evidence.get("data_gaps", []):
+        prefix = f"Event {gap['event_id']}: " if gap.get("event_id") else ""
+        data_gap_summaries.append(f"{prefix}{gap.get('detail', '')}")
 
     if not events:
         return {
@@ -1102,194 +977,41 @@ def deterministic_synthesize(
             "reasoning_truncated": False,
         }
 
-    anomalies: list[dict[str, Any]] = []
-    for e in events:
-        name = e.get("event_name") or ""
-        fields = e.get("fields", {})
+    notable_events = [event for event in events if is_critical_event(event)]
+    selected_events = (notable_events or events)[:5]
+    citations = " ".join(
+        f"[{event['event_id']}]"
+        for event in selected_events
+        if event.get("event_id")
+    )
+    if notable_events:
+        summary = (
+            f"Retrieved {len(events)} telemetry event(s); "
+            f"{len(notable_events)} meet generic failure or decode-warning indicators. {citations}"
+        ).strip()
+    else:
+        summary = (
+            f"Retrieved {len(events)} telemetry event(s); no generic failure "
+            f"indicators were detected. {citations}"
+        ).strip()
 
-        for (r_name, key, val), (sev, desc) in RULES.items():
-            if name == r_name and fields.get(key) == val:
-                anomalies.append({**e, "severity": sev, "problem": desc, "rule_key": key, "rule_val": val})
-
-        if name == "AVOIDANCE":
-            anomalies.append({
-                **e,
-                "severity": "medium",
-                "problem": f"Avoidance manoeuvre ({fields.get('reason', 'UNKNOWN')})",
-                "reason": fields.get("reason"),
-                "min_sep": fields.get("min_separation_m"),
-                "heading": fields.get("heading_change_deg"),
-            })
-
-        if name == "ERROR_EVENT":
-            sub_c = fields.get("subsystem_code") if fields.get("subsystem_code") is not None else fields.get("subsystem")
-            err_c = fields.get("error_code") if fields.get("error_code") is not None else fields.get("ecode")
-            anomalies.append({
-                **e,
-                "severity": "high" if (err_c is not None and err_c > 0) else "medium",
-                "problem": f"Subsystem error event (subsystem={sub_c}, error_code={err_c})",
-            })
-
-    if v_matches:
-        vm_anomalies: list[dict[str, Any]] = []
-        for vm in v_matches:
-            vm_id = vm.get("doc_chunk_id") or vm.get("id") or vm.get("err_id") or vm.get("code")
-            if not str(vm_id).startswith(("err-", "doc-")):
-                vm_id = f"err-{vm_id}"
-            vm_title = vm.get("title") or vm.get("name") or "Vendor Error"
-            matching_ev = None
-            for e in events:
-                if str(e.get("event_type")) == str(vm.get("code")) or e.get("event_name") == vm.get("code"):
-                    matching_ev = e
-                    break
-                if vm.get("error_code") and (str(e.get("event_type")) == str(vm.get("error_code")) or e.get("event_name") == vm.get("error_code")):
-                    matching_ev = e
-                    break
-                fields = e.get("fields", {})
-                if any(str(v) == str(vm.get("error_code")) or str(v) == str(vm.get("code")) for v in fields.values()):
-                    matching_ev = e
-                    break
-            target_ev = matching_ev or (events[0] if events else None)
-            target_eid = target_ev["event_id"] if target_ev else "ev-unknown"
-            target_src = target_ev["source_id"] if target_ev else (sources[0] if sources else 0)
-            vm_anomalies.append({
-                "source_id": target_src,
-                "event_id": target_eid,
-                "timestamp_ns": target_ev.get("timestamp_ns") if target_ev else 0,
-                "severity": vm.get("severity", "high").lower(),
-                "problem": f"{vm_title} [{vm_id}]",
-                "vendor_chunk_id": vm_id,
-                "vm": vm,
-            })
-        anomalies = vm_anomalies + anomalies
-
-    drones_left = [a for a in anomalies if a.get("fields", {}).get("state") == "LEFT_FORMATION"]
-    if drones_left:
-        left_ev = drones_left[0]
-        left_src = left_ev["source_id"]
-        form_id = left_ev.get("fields", {}).get("formation_id", "")
-        form_str = f" {form_id}" if form_id != "" else ""
-
-        drones_avoid = [a for a in anomalies if a["source_id"] == left_src and a.get("event_name") == "AVOIDANCE"]
-        other_lidar = [a for a in anomalies if a["source_id"] != left_src and a.get("fields", {}).get("status_name") == "LIDAR_TIMEOUT"]
-
-        avoid_ev = drones_avoid[0] if drones_avoid else None
-        lidar_ev = other_lidar[0] if other_lidar else None
-
-        sep = avoid_ev.get("fields", {}).get("min_separation_m", 3.2) if avoid_ev else None
-        sep_str = f" with a minimum separation of {sep} m" if sep is not None else ""
-
-        if avoid_ev:
-            summary = (
-                f"Drone {left_src} left formation{form_str} (LEFT_FORMATION [{left_ev['event_id']}]) after an avoidance manoeuvre "
-                f"for COLLISION_RISK [{avoid_ev['event_id']}]{sep_str}."
-            )
-            contributing = [
-                {
-                    "source_id": avoid_ev["source_id"],
-                    "timestamp": avoid_ev.get("timestamp_ns") or avoid_ev.get("timestamp"),
-                    "event_type": "AVOIDANCE",
-                    "event_id": avoid_ev["event_id"],
-                },
-                {
-                    "source_id": left_ev["source_id"],
-                    "timestamp": left_ev.get("timestamp_ns") or left_ev.get("timestamp"),
-                    "event_type": "FORMATION_STATE",
-                    "event_id": left_ev["event_id"],
-                },
-            ]
-        else:
-            summary = f"Drone {left_src} left formation{form_str} (LEFT_FORMATION [{left_ev['event_id']}])."
-            contributing = [
-                {
-                    "source_id": left_ev["source_id"],
-                    "timestamp": left_ev.get("timestamp_ns") or left_ev.get("timestamp"),
-                    "event_type": "FORMATION_STATE",
-                    "event_id": left_ev["event_id"],
-                }
-            ]
-
-        likely_cause = None
-        if lidar_ev:
-            timeout_cnt = lidar_ev.get("fields", {}).get("timeout_count", 0)
-            cnt_str = f" ({timeout_cnt} consecutive missed scans [{lidar_ev['event_id']}])" if timeout_cnt else f" [{lidar_ev['event_id']}]"
-            likely_cause = (
-                f"Drone {lidar_ev['source_id']} reported LIDAR_TIMEOUT{cnt_str} around the same time. "
-                f"According to domain reference d1_drone_fleet/lidar_timeout#1, a stale obstacle map on {lidar_ev['source_id']} plausibly let it drift "
-                f"towards {left_src}, triggering {left_src}'s collision avoidance."
-            )
-            contributing.insert(
-                0,
-                {
-                    "source_id": lidar_ev["source_id"],
-                    "timestamp": lidar_ev.get("timestamp_ns") or lidar_ev.get("timestamp"),
-                    "event_type": "LIDAR_STATUS",
-                    "event_id": lidar_ev["event_id"],
-                },
-            )
-        elif avoid_ev:
-            likely_cause = f"Immediate trigger was an avoidance manoeuvre for COLLISION_RISK [{avoid_ev['event_id']}]. Root cause external to source {left_src} requires querying other sources."
-
-        uncertainty = []
-        if len(sources) > 1:
-            uncertainty.append(
-                "Producer clocks are not synchronised across sources, so the order of events from different "
-                "sources cannot be established from their timestamps."
-            )
-        if lidar_ev:
-            uncertainty.append(
-                f"No event shows drone {lidar_ev['source_id']}'s actual trajectory deviation; the link between {lidar_ev['source_id']}'s timeout and {left_src}'s manoeuvre is inferred."
-            )
-        elif len(sources) == 1:
-            uncertainty.append(
-                f"Only source {left_src} was retrieved; identifying external causes or other drones involved requires querying additional sources."
-            )
-
-        return {
-            "summary": summary,
-            "likely_cause": likely_cause,
-            "confidence": "medium",
-            "contributing_events": contributing,
-            "uncertainty": uncertainty,
-            "data_gaps": data_gap_summaries,
-            "reasoning_truncated": False,
+    contributing = [
+        {
+            "source_id": event.get("source_id", 0),
+            "timestamp": event.get("timestamp_ns", event.get("timestamp", 0)),
+            "event_type": str(event.get("event_type", event.get("event_name", ""))),
+            "event_id": event.get("event_id", ""),
         }
-
-    if anomalies:
-        first = anomalies[0]
-        cites = [f"[{a['event_id']}]" for a in anomalies[:3]]
-        summary = f"Detected {len(anomalies)} anomalies across sources {', '.join(map(str, sources))}: {first['problem']} {' '.join(cites)}."
-        likely_cause = f"Failure sequence initiated by {first['problem']} [{first['event_id']}] on source {first['source_id']}."
-        contributing = [
-            {
-                "source_id": a["source_id"],
-                "timestamp": a.get("timestamp_ns") or a.get("timestamp"),
-                "event_type": a.get("event_name") or a.get("event_type"),
-                "event_id": a["event_id"],
-            }
-            for a in anomalies[:5]
-        ]
-        uncertainty = []
-        if len(sources) > 1:
-            uncertainty.append(
-                "Producer clocks are not synchronised across sources; inter-source causal links are plausible hypotheses."
-            )
-        return {
-            "summary": summary,
-            "likely_cause": likely_cause,
-            "confidence": "medium",
-            "contributing_events": contributing,
-            "uncertainty": uncertainty,
-            "data_gaps": data_gap_summaries,
-            "reasoning_truncated": False,
-        }
-
+        for event in selected_events
+        if event.get("event_id")
+    ]
+    clock_caveat = evidence.get("clock_caveat")
     return {
-        "summary": "Nominal operation: all retrieved events decoded successfully with nominal statuses.",
+        "summary": summary,
         "likely_cause": None,
-        "confidence": "high",
-        "contributing_events": [],
-        "uncertainty": ["Clocks are unverified across sources."] if len(sources) > 1 else [],
+        "confidence": "low",
+        "contributing_events": contributing,
+        "uncertainty": [clock_caveat] if clock_caveat else [],
         "data_gaps": data_gap_summaries,
         "reasoning_truncated": False,
     }
@@ -1319,66 +1041,15 @@ def synthesize_and_validate(
     enable_thinking: bool = False,
     thinking_budget: int = DEFAULT_THINKING_BUDGET,
     effective_num_ctx: int = DEFAULT_NUM_CTX,
-    exemplars_k: int = 3,
     sufficiency_gate_enabled: bool = True,
     auditor: CitationAuditor | None = None,
-    vendor_manual_matches: list[dict[str, Any]] | None = None,
-    error_catalog: list[dict[str, Any]] | dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], ValidationReport, str]:
-    """Execute end-to-end synthesis with active local backend, token budget guard, and validator."""
-    # Normalize vendor manual matches & error catalog
-    all_vendor_matches: list[dict[str, Any]] = []
-    if vendor_manual_matches:
-        all_vendor_matches.extend(vendor_manual_matches)
-    if error_catalog:
-        if isinstance(error_catalog, list):
-            all_vendor_matches.extend(error_catalog)
-        elif isinstance(error_catalog, dict):
-            if "errors" in error_catalog and isinstance(error_catalog["errors"], list):
-                all_vendor_matches.extend(error_catalog["errors"])
-            else:
-                for k, v in error_catalog.items():
-                    if isinstance(v, dict):
-                        all_vendor_matches.append({**v, "id": v.get("id", f"err-{k}")})
-                    else:
-                        all_vendor_matches.append({"id": f"err-{k}", "title": str(k), "description": str(v)})
-
-    if evidence.get("vendor_manual_matches"):
-        all_vendor_matches.extend(evidence["vendor_manual_matches"])
-    if evidence.get("vendor_matches"):
-        all_vendor_matches.extend(evidence["vendor_matches"])
-    if evidence.get("error_catalog"):
-        ec = evidence["error_catalog"]
-        if isinstance(ec, list):
-            all_vendor_matches.extend(ec)
-        elif isinstance(ec, dict) and "errors" in ec:
-            all_vendor_matches.extend(ec["errors"])
-
-    for vm in all_vendor_matches:
-        if "id" not in vm and "code" in vm:
-            subsys = vm.get("subsystem") or vm.get("subsys")
-            code = vm.get("code")
-            if subsys is not None:
-                vm["id"] = f"err-subsys-{subsys}-code-{code}"
-            else:
-                vm["id"] = f"err-{code}"
-        elif "id" in vm and not str(vm["id"]).startswith(("err-", "doc-")):
-            vm["id"] = f"err-{vm['id']}"
-
-    # 1. Retrieve hybrid knowledge and historical exemplars
+    """Run synthesis using retrieved telemetry and knowledge_base documents only."""
     knowledge = retrieve_relevant_knowledge(evidence, query, top_k=8)
-    exemplars = retrieve_historical_exemplars(query, evidence=evidence, k=exemplars_k)
     audit_engine = auditor or CitationAuditor()
 
-    # Stage 0: Pre-Generation Sufficiency Gate (RINSE-inspired)
     if sufficiency_gate_enabled:
-        sufficiency = evaluate_sufficiency(
-            evidence,
-            query,
-            knowledge,
-            vendor_manual_matches=all_vendor_matches,
-            error_catalog=error_catalog,
-        )
+        sufficiency = evaluate_sufficiency(evidence, query, knowledge)
         if not sufficiency.is_sufficient:
             quarantine_synth = create_insufficient_evidence_synthesis(sufficiency, evidence, query)
             report = audit_engine.audit(
@@ -1386,30 +1057,23 @@ def synthesize_and_validate(
                 evidence,
                 knowledge=knowledge,
                 query=query,
-                vendor_manual_matches=all_vendor_matches,
-                error_catalog=error_catalog,
             )
             return report.corrected_synthesis, report, "Stage 0 Epistemic Sufficiency Gate (Quarantined)"
 
-    # 2. Apply preflight budget guard
     guarded_evidence, was_compacted, _ = preflight_budget_guard(
         evidence,
         query,
         knowledge,
         effective_num_ctx=effective_num_ctx,
         enable_thinking=enable_thinking,
-        exemplars=exemplars,
-        vendor_manual_matches=all_vendor_matches,
     )
     context_text = build_llm_context(
         guarded_evidence,
         query,
         knowledge,
-        exemplars=exemplars,
         effective_num_ctx=effective_num_ctx,
         enable_thinking=enable_thinking,
         _skip_budget_guard=True,
-        vendor_manual_matches=all_vendor_matches,
     )
 
     synthesis: dict[str, Any] | None = None
@@ -1472,9 +1136,7 @@ def synthesize_and_validate(
 
     # 6. Fallback to offline deterministic synthesizer
     if synthesis is None:
-        synthesis = deterministic_synthesize(
-            guarded_evidence, query, knowledge, vendor_manual_matches=all_vendor_matches
-        )
+        synthesis = deterministic_synthesize(guarded_evidence, query, knowledge)
 
     # Clean schema validation
     validated_obj = validate_synthesis_schema(synthesis)
@@ -1486,7 +1148,5 @@ def synthesize_and_validate(
         guarded_evidence,
         knowledge=knowledge,
         query=query,
-        vendor_manual_matches=all_vendor_matches,
-        error_catalog=error_catalog,
     )
     return report.corrected_synthesis, report, model_used

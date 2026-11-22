@@ -44,7 +44,6 @@ os.environ["SKIP_LOCAL_HF"] = "1"
 
 from bridge.citation_auditor import CitationAuditor
 from bridge.clock_skew_compensator import analyze_clock_skew
-from bridge.error_catalog import parse_error_manual
 from bridge.hybrid_rag import HybridRetriever
 from bridge.java_retriever import JavaRetriever
 from bridge.report_exporter import export_html, export_jsonld, export_pdf
@@ -66,12 +65,10 @@ class TestCaseConfig:
     domain_name: str
     bin_file: Path
     schema_file: Path
-    manual_file: Path
     query: str
     manifest_file: Path | None = None
     expected_root_cause: str | None = None
     expected_source_id: int | None = None
-    vendor_name: str = "auto"
     special_checks: list[str] = field(default_factory=list)
 
 
@@ -85,7 +82,7 @@ class TestCaseResult:
     decoded_count: int
     decode_statuses: dict[str, int]
     rag_chunks_count: int
-    rag_isolation_verified: bool
+    rag_knowledge_base_only: bool
     synthesis_summary: str
     synthesis_likely_cause: str
     validation_badge: str
@@ -100,8 +97,6 @@ class TestCaseResult:
 def get_test_cases() -> list[TestCaseConfig]:
     rw_dir = ROOT_DIR / "test_data" / "real_world"
     schemas_dir = ROOT_DIR / "schemas"
-    manuals_dir = ROOT_DIR / "domain_manuals"
-
     return [
         # D1: Drones
         TestCaseConfig(
@@ -109,8 +104,6 @@ def get_test_cases() -> list[TestCaseConfig]:
             domain_name="D1 Drones",
             bin_file=rw_dir / "d1_px4_sample.fss.bin",
             schema_file=schemas_dir / "drone_v0.yaml",
-            manual_file=manuals_dir / "px4_error_codes.md",
-            vendor_name="px4",
             query="Diagnose flight anomalies, barometer drift, and GPS dropouts across drone telemetry.",
         ),
         # D2: Microservices (CPU)
@@ -119,11 +112,9 @@ def get_test_cases() -> list[TestCaseConfig]:
             domain_name="D2 Microservices (CPU)",
             bin_file=rw_dir / "d2_rcaeval_cpu.fss.bin",
             schema_file=schemas_dir / "microservices_v0.yaml",
-            manual_file=manuals_dir / "microservices_error_codes.md",
             manifest_file=rw_dir / "d2_rcaeval_cpu.fss.manifest.json",
             expected_root_cause="checkoutservice",
             expected_source_id=102,
-            vendor_name="microservices",
             query="Diagnose CPU spike anomalies and service degradation. Identify the root cause service.",
         ),
         # D2: Microservices (Delay)
@@ -132,11 +123,9 @@ def get_test_cases() -> list[TestCaseConfig]:
             domain_name="D2 Microservices (Delay)",
             bin_file=rw_dir / "d2_rcaeval_delay.fss.bin",
             schema_file=schemas_dir / "microservices_v0.yaml",
-            manual_file=manuals_dir / "microservices_error_codes.md",
             manifest_file=rw_dir / "d2_rcaeval_delay.fss.manifest.json",
             expected_root_cause="checkoutservice",
             expected_source_id=102,
-            vendor_name="microservices",
             query="Diagnose high request latency and network delay timeouts. Identify the failing microservice.",
         ),
         # D2: Microservices (Socket)
@@ -145,11 +134,9 @@ def get_test_cases() -> list[TestCaseConfig]:
             domain_name="D2 Microservices (Socket)",
             bin_file=rw_dir / "d2_rcaeval_socket.fss.bin",
             schema_file=schemas_dir / "microservices_v0.yaml",
-            manual_file=manuals_dir / "microservices_error_codes.md",
             manifest_file=rw_dir / "d2_rcaeval_socket.fss.manifest.json",
             expected_root_cause="checkoutservice",
             expected_source_id=102,
-            vendor_name="microservices",
             query="Diagnose socket connection drops and 500 error rates. Identify the root cause service.",
         ),
         # D3: Industrial PLC / SCADA
@@ -158,9 +145,7 @@ def get_test_cases() -> list[TestCaseConfig]:
             domain_name="D3 Industrial PLC",
             bin_file=rw_dir / "d3_industrial_plc.fss.bin",
             schema_file=schemas_dir / "industrial_plc_v0.yaml",
-            manual_file=manuals_dir / "industrial_plc_error_codes.md",
             manifest_file=rw_dir / "d3_industrial_plc.fss.manifest.json",
-            vendor_name="industrial_plc",
             query="Analyze industrial boiler pressure anomalies, turbine trips, and Modbus communication alarms.",
         ),
         # D4: Automotive CAN Bus
@@ -169,9 +154,7 @@ def get_test_cases() -> list[TestCaseConfig]:
             domain_name="D4 Automotive CAN",
             bin_file=rw_dir / "d4_can_vehicle.fss.bin",
             schema_file=schemas_dir / "autonomous_vehicle_v0.yaml",
-            manual_file=manuals_dir / "can_bus_error_codes.md",
             manifest_file=rw_dir / "d4_can_vehicle.fss.manifest.json",
-            vendor_name="can_bus",
             query="Analyze brake warning light anomalies and unmapped CAN arbitration ID messages.",
             special_checks=["check_unmapped_0x0499", "check_zero_raw_bytes_leak"],
         ),
@@ -181,8 +164,6 @@ def get_test_cases() -> list[TestCaseConfig]:
             domain_name="D5 Robotics MCAP",
             bin_file=rw_dir / "robotics_mcap.fss.bin",
             schema_file=schemas_dir / "drone_v0.yaml",
-            manual_file=manuals_dir / "warehouse_robots_error_codes.md",
-            vendor_name="warehouse_robots",
             query="Audit robot navigation telemetry and sensor channel dropouts.",
         ),
         # D6: Distributed Systems (Loghub)
@@ -191,9 +172,7 @@ def get_test_cases() -> list[TestCaseConfig]:
             domain_name="D6 Distributed Systems",
             bin_file=rw_dir / "d6_loghub_distributed.fss.bin",
             schema_file=schemas_dir / "microservices_v0.yaml",
-            manual_file=manuals_dir / "loghub_error_codes.md",
             manifest_file=rw_dir / "d6_loghub_distributed.fss.manifest.json",
-            vendor_name="loghub",
             query="Analyze distributed block replication failures, network partition timeouts, and cluster node errors.",
         ),
     ]
@@ -265,40 +244,20 @@ def run_evaluation_case(tc: TestCaseConfig, exports_base_dir: Path) -> TestCaseR
             print(f"  --> [HR-10 PASS] Verified {len(can_0499_events)} unmapped 0x0499 events marked UNKNOWN_EVENT_TYPE")
 
         # -------------------------------------------------------------------------
-        # STEP 4: Domain Manual Hybrid RAG & Isolation Check (RAG-10)
+        # STEP 4: Knowledge-base retrieval
         # -------------------------------------------------------------------------
-        print(f"  [Step 4] Hybrid RAG Indexing & Domain Isolation ({tc.manual_file.name})...")
-        manual_content = tc.manual_file.read_text(encoding="utf-8")
-        vendor_entries = parse_error_manual(manual_content, tc.manual_file.name, vendor=tc.vendor_name)
-        assert len(vendor_entries) > 0, f"Failed to parse error entries from {tc.manual_file.name}!"
-
-        # Index into isolated hybrid retriever
-        rag = HybridRetriever(vendor_entries=vendor_entries)
-        # Query RAG
+        print("  [Step 4] Retrieving knowledge-base context...")
+        rag = HybridRetriever.get_instance()
         sample_query = tc.query
         retrieved_chunks = rag.retrieve_knowledge(sample_query, top_k=8)
         print(f"  --> RAG retrieved {len(retrieved_chunks)} chunks for query: '{sample_query[:50]}...'")
-
-        # Cross-Domain Leakage Check (RAG-10):
-        # When querying for domain-specific errors, chunks from other domains must not leak
-        rag_isolated = True
-        if tc.vendor_name == "can_bus":
-            can_test_chunks = rag.retrieve_knowledge("CAN_ERR_CRC 0x0402 BRAKE_ACTUATOR_FAULT", top_k=5)
-            for c in can_test_chunks:
-                c_domain = c.get("domain", "").lower()
-                c_id = c.get("id", "").lower()
-                if "drone" in c_domain or "drone" in c_id or "uav" in c_domain:
-                    rag_isolated = False
-            assert rag_isolated, "Cross-Domain Leakage! Drone chunks returned for CAN bus query!"
-            print(f"  --> [RAG-10 PASS] Verified zero cross-domain leakage for automotive CAN queries.")
-        elif tc.vendor_name == "microservices":
-            ms_test_chunks = rag.retrieve_knowledge("DB_POOL SATURATED 504 GATEWAY_TIMEOUT", top_k=5)
-            for c in ms_test_chunks:
-                c_domain = c.get("domain", "").lower()
-                if "drone" in c_domain or "plc" in c_domain:
-                    rag_isolated = False
-            assert rag_isolated, "Cross-Domain Leakage! Drone/PLC chunks returned for Microservices query!"
-            print(f"  --> [RAG-10 PASS] Verified zero cross-domain leakage for microservice queries.")
+        rag_kb_only = all(
+            chunk.get("domain") == "knowledge_base"
+            and bool(chunk.get("source_filename"))
+            for chunk in retrieved_chunks
+        )
+        if not rag_kb_only:
+            raise AssertionError("Retrieved domain context must originate from knowledge_base/.")
 
         # -------------------------------------------------------------------------
         # STEP 5: Failure Synthesis & 4-Tier Citation Auditor
@@ -367,12 +326,7 @@ def run_evaluation_case(tc: TestCaseConfig, exports_base_dir: Path) -> TestCaseR
             assert "UNKNOWN_EVENT_TYPE" in context_str, "UNKNOWN_EVENT_TYPE marker missing!"
             print(f"  --> [HR-12 PASS] Verified zero raw unmapped payload bytes leaked into LLM context.")
 
-        vendor_matches_docs = [e.to_doc() for e in vendor_entries]
-        synthesis, val_report, model_name = synthesize_and_validate(
-            evidence,
-            tc.query,
-            vendor_manual_matches=vendor_matches_docs,
-        )
+        synthesis, val_report, model_name = synthesize_and_validate(evidence, tc.query)
 
         val_verdict = val_report.verdict
         val_badge = str(getattr(val_report, "badge", val_report.verdict))
@@ -449,7 +403,7 @@ def run_evaluation_case(tc: TestCaseConfig, exports_base_dir: Path) -> TestCaseR
             decoded_count=decoded_count,
             decode_statuses=status_counts,
             rag_chunks_count=len(retrieved_chunks),
-            rag_isolation_verified=rag_isolated,
+            rag_knowledge_base_only=rag_kb_only,
             synthesis_summary=syn_summary,
             synthesis_likely_cause=syn_cause,
             validation_badge=val_badge,
@@ -473,7 +427,7 @@ def run_evaluation_case(tc: TestCaseConfig, exports_base_dir: Path) -> TestCaseR
             decoded_count=0,
             decode_statuses={},
             rag_chunks_count=0,
-            rag_isolation_verified=False,
+            rag_knowledge_base_only=False,
             synthesis_summary="",
             synthesis_likely_cause="",
             validation_badge="FAILED",

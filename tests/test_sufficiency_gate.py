@@ -1,15 +1,10 @@
 """Unit and adversarial tests for Stage 0 Pre-Generation Sufficiency Gate.
 
 Tests:
-  1. Deterministic short-circuit on 0 events (status == "EMPTY").
-  2. Deterministic short-circuit when all events have uninterpretable decode statuses.
-  3. Deterministic short-circuit when unrecorded data gaps span the requested failure window.
-  4. Content coverage: query with present entities (Drone 474) passes.
-  5. Content coverage: query with completely unobserved entities (Drone 901) fails and quarantines.
-  6. Candidate span detection: failure query on nominal-only events triggers low score.
-  7. Candidate span detection: failure query with anomaly events triggers high score.
-  8. Cross-passage latent sufficiency evaluates domain knowledge bridges.
-  9. Quarantine payload generation and synthesis formatting.
+  1. Empty, uninterpretable, and explicitly gapped retrievals are quarantined.
+  2. Explicitly requested source coverage is checked without domain-specific entity labels.
+  3. Available telemetry remains analyzable without hardcoded anomaly or cause rules.
+  4. Knowledge-base documents are optional context.
 """
 
 from __future__ import annotations
@@ -62,7 +57,7 @@ class TestSufficiencyGate(unittest.TestCase):
         self.assertEqual(res.status, SufficiencyStatus.INSUFFICIENT_EVIDENCE)
         self.assertEqual(res.score, 0.0)
         self.assertTrue(res.bypass_synthesis)
-        self.assertIn("0 events retrieved", res.reason)
+        self.assertIn("No telemetry events were retrieved", res.reason)
         self.assertEqual(res.quarantine_payload.get("status"), "QUARANTINED")
 
         # Verify quarantine synthesis
@@ -100,7 +95,7 @@ class TestSufficiencyGate(unittest.TestCase):
         self.assertIn("uninterpretable", res.reason)
 
     def test_03_spanning_data_gap_short_circuit(self):
-        """Unrecorded data gap spanning the requested failure window triggers deterministic gate."""
+        """An explicitly reported unrecorded gap triggers the generic availability gate."""
         spanning_evidence = {
             "format": "fss-evidence/v0",
             "query": "Why did drone 474 leave formation?",
@@ -116,64 +111,60 @@ class TestSufficiencyGate(unittest.TestCase):
         res = evaluate_sufficiency(spanning_evidence, "Why did drone 474 leave formation?")
         self.assertFalse(res.is_sufficient)
         self.assertEqual(res.status, SufficiencyStatus.INSUFFICIENT_EVIDENCE)
-        self.assertIn("spans the requested failure window", res.reason)
+        self.assertIn("explicit telemetry gap", res.reason)
 
-    def test_04_content_coverage_queried_entity_present(self):
-        """Query asking about drone 474 with drone 474 in evidence sources passes coverage."""
-        res = evaluate_sufficiency(self.evidence_scenario, "Why did drone 474 leave formation?")
+    def test_04_requested_source_present(self):
+        """An explicitly named source identifier is checked against retrieved telemetry."""
+        res = evaluate_sufficiency(self.evidence_scenario, "Why did source 474 stop?")
         self.assertTrue(res.is_sufficient)
         self.assertEqual(res.status, SufficiencyStatus.SUFFICIENT)
         self.assertFalse(res.bypass_synthesis)
         self.assertGreaterEqual(res.score, 0.5)
 
-        cov_check = next(c for c in res.checks if c.name == "question_content_coverage")
-        self.assertTrue(cov_check.passed)
-        self.assertEqual(cov_check.score, 1.0)
+        source_check = next(c for c in res.checks if c.name == "requested_source_coverage")
+        self.assertTrue(source_check.passed)
+        self.assertEqual(source_check.score, 1.0)
 
-    def test_05_content_coverage_queried_entity_absent(self):
-        """Query asking specifically about drone 999 (not in evidence) must fail sufficiency."""
-        res = evaluate_sufficiency(self.evidence_scenario, "Why did drone 999 crash?")
+    def test_05_requested_source_absent(self):
+        """An explicitly requested but unavailable source must fail the coverage gate."""
+        res = evaluate_sufficiency(self.evidence_scenario, "Why did source 999 stop?")
         self.assertFalse(res.is_sufficient)
         self.assertEqual(res.status, SufficiencyStatus.INSUFFICIENT_EVIDENCE)
         self.assertTrue(res.bypass_synthesis)
         self.assertIn("999", res.reason)
-        self.assertIn(999, res.quarantine_payload.get("missing_entities", []))
+        self.assertIn(999, res.quarantine_payload.get("missing_sources", []))
 
         # Quarantine synthesis test
-        synth = create_insufficient_evidence_synthesis(res, self.evidence_scenario, "Why did drone 999 crash?")
-        self.assertIn("INSUFFICIENT EVIDENCE", synth["summary"])
-        self.assertIn("999", synth["summary"])
+        synth = create_insufficient_evidence_synthesis(res, self.evidence_scenario, "Why did source 999 stop?")
+        self.assertIsNotNone(synth["summary"])
         self.assertEqual(synth["confidence"], "low")
         self.assertEqual(synth["contributing_events"], [])
 
-    def test_06_candidate_spans_nominal_failure_query(self):
-        """When user asks a causal failure query but 100% of telemetry is nominal, candidate spans fail."""
+    def test_06_available_nominal_telemetry_is_not_rejected_by_domain_rules(self):
+        """The generic gate does not require hardcoded anomaly labels to allow analysis."""
         nominal_evidence = {
             "format": "fss-evidence/v0",
-            "query": "Why did drone 474 fail?",
+            "query": "What is shown by source 474?",
             "sources": [474],
             "events": [
                 {
                     "event_id": "ev-aaaaaaaaaaaa",
                     "source_id": 474,
-                    "event_name": "HEARTBEAT",
+                    "event_name": "EVENT",
                     "decode_status": "SUCCESS",
-                    "fields": {"status_name": "NOMINAL"},
+                    "fields": {"value": 1},
                 }
             ],
             "data_gaps": [],
         }
-        res = evaluate_sufficiency(nominal_evidence, "Why did drone 474 fail?")
-        span_check = next(c for c in res.checks if c.name == "candidate_span_detection")
-        self.assertFalse(span_check.passed)
-        self.assertLess(span_check.score, 0.5)
+        res = evaluate_sufficiency(nominal_evidence, "What is shown by source 474?")
+        self.assertTrue(res.is_sufficient)
+        self.assertTrue(res.checks[0].passed)
 
-    def test_07_candidate_spans_anomalies_detected(self):
-        """When candidate anomaly spans exist (AVOIDANCE, LEFT_FORMATION, LIDAR_TIMEOUT), score is boosted."""
-        res = evaluate_sufficiency(self.evidence_scenario, "Why did drone 474 leave formation?")
-        span_check = next(c for c in res.checks if c.name == "candidate_span_detection")
-        self.assertTrue(span_check.passed)
-        self.assertGreaterEqual(span_check.score, 0.7)
+    def test_07_telemetry_indicators_are_descriptive_not_a_gate(self):
+        res = evaluate_sufficiency(self.evidence_scenario, "Summarize the retrieved events.")
+        indicator_check = next(c for c in res.checks if c.name == "telemetry_indicators")
+        self.assertTrue(indicator_check.passed)
 
     def test_08_no_false_lockout_on_general_queries(self):
         """General exploratory queries must not falsely lock out on logs containing telemetry."""
@@ -181,7 +172,7 @@ class TestSufficiencyGate(unittest.TestCase):
             "What went wrong in this log?",
             "Analyze all errors and root causes",
             "Why did altitude diverge?",
-            "Summarize anomalies using the error code manual",
+            "Summarize retrieved reference context",
         ]
         for q in general_queries:
             res = evaluate_sufficiency(self.evidence_scenario, q)
@@ -192,13 +183,10 @@ class TestSufficiencyGate(unittest.TestCase):
         """Numbers like 404, 500, 100, 171 must not be treated as required entity source IDs."""
         query = "Explain HTTP 404 or error 500 at altitude 100 in log 171"
         res = evaluate_sufficiency(self.evidence_scenario, query)
-        cov_check = next(c for c in res.checks if c.name == "question_content_coverage")
-        self.assertTrue(cov_check.passed)
-        self.assertEqual(cov_check.score, 1.0)
         self.assertTrue(res.is_sufficient)
 
     def test_10_blackout_data_gap_short_circuit(self):
-        """A genuine blackout gap (> 30s) across failure window short-circuits to INSUFFICIENT_EVIDENCE."""
+        """An explicit blackout gap short-circuits without inferring a domain-specific threshold."""
         blackout_evidence = {
             "format": "fss-evidence/v0",
             "query": "What caused the crash?",
@@ -222,7 +210,9 @@ class TestSufficiencyGate(unittest.TestCase):
                     "fields": {"subsys": 1, "ecode": 99},
                 },
             ],
-            "data_gaps": [],
+            "data_gaps": [
+                {"kind": "BLACKOUT", "detail": "Telemetry was not recorded in this interval."}
+            ],
         }
         res = evaluate_sufficiency(blackout_evidence, "What caused the crash?")
         self.assertFalse(res.is_sufficient)
@@ -230,34 +220,36 @@ class TestSufficiencyGate(unittest.TestCase):
         self.assertTrue(res.bypass_synthesis)
         self.assertIn("blackout", res.reason.lower())
 
-    def test_11_vendor_manual_matches_candidate_spans(self):
-        """Vendor-manual error matches are recognized as candidate anomaly spans."""
-        nominal_evidence = {
+    def test_11_knowledge_base_context_is_optional(self):
+        """Sufficiency is determined by telemetry availability, not reference documents."""
+        telemetry = {
             "format": "fss-evidence/v0",
-            "query": "Summarize anomalies using the error code manual",
+            "query": "Summarize the retrieved events",
             "sources": [1],
             "events": [
                 {
                     "event_id": "ev-000000000001",
                     "source_id": 1,
-                    "event_name": "HEARTBEAT",
+                    "event_name": "EVENT",
                     "decode_status": "SUCCESS",
-                    "fields": {"status_name": "NOMINAL"},
+                    "fields": {"value": 1},
                 }
             ],
             "data_gaps": [],
         }
-        vendor_matches = [
-            {"id": "err-subsys-2-code-1", "title": "Crash Check Error", "description": "Crash detector triggered."}
-        ]
-        res = evaluate_sufficiency(
-            nominal_evidence,
-            "Summarize anomalies using the error code manual",
-            vendor_manual_matches=vendor_matches,
+        document = {"id": "doc-kb-reference", "content": "Reference context"}
+
+        without_docs = evaluate_sufficiency(telemetry, telemetry["query"])
+        with_docs = evaluate_sufficiency(
+            telemetry, telemetry["query"], knowledge=[document]
         )
-        self.assertTrue(res.is_sufficient)
-        span_check = next(c for c in res.checks if c.name == "candidate_span_detection")
-        self.assertTrue(span_check.passed)
+
+        self.assertEqual(without_docs.status, with_docs.status)
+        self.assertTrue(with_docs.is_sufficient)
+        knowledge_check = next(
+            check for check in with_docs.checks if check.name == "knowledge_base_context"
+        )
+        self.assertIn("1 knowledge_base document", knowledge_check.details)
 
 
 if __name__ == "__main__":

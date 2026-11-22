@@ -6,7 +6,7 @@ Integrates:
   - Thread-Safe Resource Caching with ThreadSafeWrapper & st.cache_resource
   - Deterministic SHA-256 upload caching via BinCacheManager
   - Smart whole-dataset telemetry condensation (condense_telemetry)
-  - Vendor Error Manual RAG ingestion (load_builtin_manual, parse_error_manual, VendorErrorEntry)
+  - Knowledge-base retrieval from the repository knowledge_base/ directory
   - Epistemic Citation Validator supporting 5 Functional Phosphor Validation Badges:
       * VERIFIED_SUPPORTED (Phosphor Green)
       * FORCE_OVERCLAIM (Phosphor Amber)
@@ -72,16 +72,6 @@ from bridge.bin_ingestor import (
     is_critical_event,
     normalize_time_bounds,
 )
-from bridge.error_catalog import (
-    VendorErrorEntry,
-    extract_error_codes_from_events,
-    load_builtin_manual,
-    parse_error_manual,
-)
-from bridge.hybrid_rag import (
-    HybridRetriever,
-    enrich_evidence_with_manual,
-)
 from bridge.java_retriever import (
     JavaReceipt,
     JavaRetriever,
@@ -104,9 +94,7 @@ except Exception:
     pass
 
 from bridge.synthesizer import (
-    DOMAIN_KNOWLEDGE,
     LOCAL_HF_PATH,
-    RULES,
     ValidationReport,
     build_llm_context,
     check_ollama_available,
@@ -124,21 +112,21 @@ STORAGE_PROPERTIES = ROOT / "fss-core" / "storage.properties"
 MAX_WINDOW_NS = 3600 * 10**9  # 1 hour max retrieval window contract
 
 
-def detect_binary_format(data: bytes) -> tuple[str, str]:
-    """Detect binary log wire format and vendor profile hint from raw initial bytes."""
+def detect_binary_format(data: bytes) -> str:
+    """Detect the binary envelope format from raw initial bytes."""
     if len(data) >= 2 and data[0] == 0xA3 and data[1] == 0x95:
-        return "ARDUPILOT DATAFLASH", "ardupilot"
+        return "ARDUPILOT DATAFLASH"
     if len(data) >= 2 and data[:2] == b"\x53\x46":
-        return "FSS WIRE V0", "fss_native"
+        return "FSS WIRE V0"
     if len(data) >= 20:
         try:
             HEADER = struct.Struct(">IQII")
             agent_id, ts, plen, etype = HEADER.unpack_from(data, 0)
             if 0 < plen < 65536 and 0 < etype < 256:
-                return "BIG-ENDIAN CFG", "fss_native"
+                return "BIG-ENDIAN CFG"
         except Exception:
             pass
-    return "BINARY ENVELOPE", "auto"
+    return "BINARY ENVELOPE"
 
 
 def pick_directory_native() -> str | None:
@@ -412,22 +400,18 @@ def cached_retrieve_knowledge(
     top_k: int = 8,
     _evidence: dict[str, Any] | None = None,
 ) -> list[dict[str, str]]:
-    """Cache immutable domain knowledge retrieval chunks."""
-    if _evidence is None:
-        return DOMAIN_KNOWLEDGE[:top_k]
-    return retrieve_relevant_knowledge(_evidence, query, top_k=top_k)
+    """Cache immutable knowledge_base retrieval chunks."""
+    return retrieve_relevant_knowledge(_evidence or {"events": []}, query, top_k=top_k)
 
 
 @st.cache_data(show_spinner=False)
 def cached_synthesize_and_validate(
     query: str,
     evidence_hash: str,
-    vendor_matches_hash: str,
     _evidence: dict[str, Any],
-    _vendor_matches: list[dict[str, Any]],
 ) -> tuple[dict[str, Any], ValidationReport, str]:
-    """Cache immutable RAG synthesis and citation validation outputs."""
-    return synthesize_and_validate(_evidence, query, vendor_manual_matches=_vendor_matches)
+    """Cache synthesis grounded in telemetry and knowledge_base documents."""
+    return synthesize_and_validate(_evidence, query)
 
 
 # -----------------------------------------------------------------------------
@@ -612,57 +596,15 @@ def compute_epistemic_badge(
 
 def generate_dynamic_query_chips(
     events: list[dict[str, Any]] | list[EventRecord],
-    detected_error_codes: list[str],
     sources: list[int],
 ) -> list[str]:
-    """Generate dynamic, context-aware query chips strictly based on what is detected in the uploaded dataset.
-
-    Never mentions drone 474 unless drone 474 exists in the active dataset.
-    """
+    """Generate platform-neutral query suggestions from retrieved telemetry."""
     chips: list[str] = []
 
-    # 1. Error manual diagnostics if error codes or critical events present
-    if detected_error_codes or any(is_critical_event(e) for e in events[:100]):
-        chips.append("Diagnose all detected errors using loaded error manual")
-
-    # 2. Check for EKF, altitude, IMU, compass, vibration
-    has_ekf_or_imu = False
-    for ev in events[:200]:
-        ename = str(ev.get("event_name") if isinstance(ev, dict) else getattr(ev, "event_name", "")).upper()
-        etype = str(ev.get("event_type") if isinstance(ev, dict) else getattr(ev, "event_type", "")).upper()
-        if any(k in ename or k in etype for k in ("EKF", "BARO", "ALT", "VIBE", "IMU", "COMPASS", "0X43", "0X44")):
-            has_ekf_or_imu = True
-            break
-    if has_ekf_or_imu:
-        chips.append("Inspect EKF & altitude anomalies")
-
-    # 3. Check for formation, avoidance, lidar
-    has_avoid_or_formation = False
-    for ev in events[:200]:
-        ename = str(ev.get("event_name") if isinstance(ev, dict) else getattr(ev, "event_name", "")).upper()
-        etype = str(ev.get("event_type") if isinstance(ev, dict) else getattr(ev, "event_type", "")).upper()
-        if any(k in ename or k in etype for k in ("AVOID", "FORMATION", "LIDAR", "0X10", "0X20", "0X21")):
-            has_avoid_or_formation = True
-            break
-    if has_avoid_or_formation:
-        chips.append("Analyze formation flight & collision avoidance triggers")
-
-    # 4. Source-specific telemetry fault probes (strictly for sources in this file)
-    critical_sources = []
-    for ev in events:
-        if is_critical_event(ev):
-            src = ev.get("source_id") if isinstance(ev, dict) else getattr(ev, "source_id", None)
-            if src is not None and src not in critical_sources and src in sources:
-                critical_sources.append(src)
-    for src in critical_sources[:2]:
-        chips.append(f"Investigate Source {src} failure sequence")
-
-    # 5. General fallback chips
-    if "Audit telemetry gaps & health timeline" not in chips:
-        chips.append("Audit telemetry gaps & health timeline")
-    if len(chips) < 4:
-        chips.append("Summarize fleet status & mission phases")
-
+    if any(is_critical_event(event) for event in events[:200]):
+        chips.append("Review events with failure or decode-warning indicators")
+    chips.append("Summarize retrieved telemetry and data gaps")
+    chips.extend(f"Review telemetry from source {source}" for source in sources[:2])
     return chips
 
 
@@ -904,7 +846,7 @@ def render_auto_simulator_view() -> None:
                 "Telemetry Domain",
                 ["Random Domain"] + SUPPORTED_DOMAINS,
                 index=0,
-                help="Select target domain schema and vendor error manual, or choose Random Domain for dynamic discovery.",
+                help="Select a schema and scenario type for generating synthetic telemetry.",
             )
         with col_c:
             event_count = st.slider(
@@ -1042,7 +984,6 @@ def render_auto_simulator_view() -> None:
             st.session_state["active_store_path"] = str(handoff_data["store_path"])
             st.session_state["active_bin_path"] = str(handoff_data["bin_path"])
             st.session_state["active_schema_path"] = str(handoff_data["schema_path"])
-            st.session_state["active_manual_profile"] = handoff_data["matched_manual_profile"]
             st.session_state["operator_query"] = handoff_data["blind_query"]
             st.session_state["sim_ground_truth"] = handoff_data["ground_truth"]
             st.session_state["sim_active_filename"] = Path(handoff_data["store_path"]).name
@@ -1150,7 +1091,6 @@ def main() -> None:
             st.session_state.pop("active_store_path", None)
             st.session_state.pop("active_bin_path", None)
             st.session_state.pop("active_schema_path", None)
-            st.session_state.pop("active_manual_profile", None)
 
             upload = st.file_uploader(
                 "Upload Telemetry Binary (.bin / .fss.bin)",
@@ -1183,7 +1123,6 @@ def main() -> None:
             st.session_state.pop("active_store_path", None)
             st.session_state.pop("active_bin_path", None)
             st.session_state.pop("active_schema_path", None)
-            st.session_state.pop("active_manual_profile", None)
 
             if fixture_files:
                 sel_name = st.selectbox("Select Golden Fixture", fixture_files, index=0)
@@ -1293,7 +1232,6 @@ def main() -> None:
             st.session_state.pop("active_store_path", None)
             st.session_state.pop("active_bin_path", None)
             st.session_state.pop("active_schema_path", None)
-            st.session_state.pop("active_manual_profile", None)
 
             cat = st.selectbox(
                 "IPC Source Corpus",
@@ -1323,8 +1261,7 @@ def main() -> None:
                         st.cache_resource.clear()
                         st.cache_data.clear()
 
-        # Detect wire format & vendor hint
-        detected_fmt, vendor_hint = detect_binary_format(raw_bytes_sample)
+        detected_fmt = detect_binary_format(raw_bytes_sample)
 
     # Workspace controller: if in Auto-Simulator, render the simulator workspace and exit immediately
     if source_mode == "Auto-Simulate Unseen Pipeline (Live)" or st.session_state.get("active_workspace") == "Auto-Simulator":
@@ -1429,115 +1366,10 @@ def main() -> None:
         st.divider()
 
         # =====================================================================
-        # SIDEBAR: SECTION 2 — Vendor Error-Code Manual (RAG Spec)
+        # SIDEBAR: SECTION 2 — Knowledge Base
         # =====================================================================
-        st.markdown("### 📖 2. Vendor Error Manual (RAG)")
-
-        manual_profile_options = [
-            "Auto-Matched (Default)",
-            "ArduPilot Flight DataFlash",
-            "PX4 Autopilot uORB",
-            "FSS Native Telemetry",
-            "Microservices Architecture",
-            "Industrial PLC & Manufacturing",
-            "Autonomous Vehicle CAN Bus",
-            "Warehouse AGVs & Robotics",
-            "Consolidated (All Built-in)",
-            "Custom File Upload Only",
-        ]
-        active_prof = st.session_state.get("active_manual_profile")
-        default_prof_idx = manual_profile_options.index(active_prof) if active_prof in manual_profile_options else 0
-
-        manual_profile = st.selectbox(
-            "Error Manual Profile",
-            manual_profile_options,
-            index=default_prof_idx,
-            help="Select the reference fault specification profile to match against decoded telemetry.",
-        )
-
-        custom_manual_file = st.file_uploader(
-            "Upload Custom Manual (.txt, .md, .json, .csv)",
-            type=["txt", "md", "json", "csv"],
-            help="Upload vendor fault code specifications to dynamically index into Hybrid RAG.",
-        )
-
-        # Resolve vendor entries
-        active_vendor_entries: list[VendorErrorEntry] = []
-        vendor_label = "Auto"
-
-        # 1. Custom manual file
-        if custom_manual_file is not None:
-            c_bytes = custom_manual_file.getvalue()
-            custom_entries = parse_error_manual(c_bytes, custom_manual_file.name, vendor="auto")
-            active_vendor_entries.extend(custom_entries)
-            vendor_label = f"Custom ({custom_manual_file.name})"
-
-        # 2. Built-in profile
-        if manual_profile != "Custom File Upload Only":
-            if manual_profile == "Auto-Matched (Default)":
-                active_prof = st.session_state.get("active_manual_profile")
-                if active_prof == "Microservices Architecture":
-                    active_vendor_entries.extend(load_builtin_manual("microservices"))
-                    vendor_label = "Microservices (Auto-Matched)"
-                elif active_prof == "Industrial PLC & Manufacturing":
-                    active_vendor_entries.extend(load_builtin_manual("industrial_plc"))
-                    vendor_label = "Industrial PLC (Auto-Matched)"
-                elif active_prof == "Autonomous Vehicle CAN Bus":
-                    active_vendor_entries.extend(load_builtin_manual("can_bus"))
-                    vendor_label = "CAN Bus / ECU (Auto-Matched)"
-                elif active_prof == "Warehouse AGVs & Robotics":
-                    active_vendor_entries.extend(load_builtin_manual("warehouse_robots"))
-                    vendor_label = "Warehouse AGVs (Auto-Matched)"
-                elif vendor_hint == "ardupilot":
-                    active_vendor_entries.extend(load_builtin_manual("ardupilot"))
-                    vendor_label = "ArduPilot (Auto-Matched)"
-                elif vendor_hint == "fss_native":
-                    active_vendor_entries.extend(load_builtin_manual("fss_native"))
-                    vendor_label = "FSS Native (Auto-Matched)"
-                else:
-                    active_vendor_entries.extend(load_builtin_manual("all"))
-                    vendor_label = "All Built-in (Consolidated)"
-            elif manual_profile == "ArduPilot Flight DataFlash":
-                active_vendor_entries.extend(load_builtin_manual("ardupilot"))
-                vendor_label = "ArduPilot"
-            elif manual_profile == "PX4 Autopilot uORB":
-                active_vendor_entries.extend(load_builtin_manual("px4"))
-                vendor_label = "PX4 Autopilot"
-            elif manual_profile == "FSS Native Telemetry":
-                active_vendor_entries.extend(load_builtin_manual("fss_native"))
-                vendor_label = "FSS Native"
-            elif manual_profile == "Microservices Architecture":
-                active_vendor_entries.extend(load_builtin_manual("microservices"))
-                vendor_label = "Microservices"
-            elif manual_profile == "Industrial PLC & Manufacturing":
-                active_vendor_entries.extend(load_builtin_manual("industrial_plc"))
-                vendor_label = "Industrial PLC"
-            elif manual_profile == "Autonomous Vehicle CAN Bus":
-                active_vendor_entries.extend(load_builtin_manual("can_bus"))
-                vendor_label = "Autonomous Vehicle CAN"
-            elif manual_profile == "Warehouse AGVs & Robotics":
-                active_vendor_entries.extend(load_builtin_manual("warehouse_robots"))
-                vendor_label = "Warehouse AGVs"
-            elif manual_profile == "Consolidated (All Built-in)":
-                active_vendor_entries.extend(load_builtin_manual("all"))
-                vendor_label = "Consolidated (All)"
-
-        # Index digested entries into HybridRetriever
-        if active_vendor_entries:
-            try:
-                HybridRetriever.get_instance().index_vendor_manual(active_vendor_entries)
-            except Exception:
-                pass
-
-        st.markdown(
-            f"""
-            <div class="crt-status-indicator">
-                <span class="crt-status-dot cyan"></span>
-                <span>{len(active_vendor_entries)} ERROR CODES DIGESTED · {vendor_label}</span>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        st.markdown("### 📖 2. Knowledge Base (RAG)")
+        st.caption("Domain references are loaded only from the repository knowledge_base/ directory.")
 
         st.divider()
 
@@ -1587,16 +1419,15 @@ def main() -> None:
     # MAIN AREA: Clean Top-of-Page Operator Query Layout
     # =========================================================================
 
-    # Initial probe of detected error codes from sample envelopes for dynamic chips
+    # Initial probe of decoded telemetry for platform-neutral query suggestions
     registry = get_schema_registry(st.session_state.get("active_schema_path"))
     initial_decoded = decode_all(sample_envelopes[:100], registry) if sample_envelopes else []
-    detected_codes = extract_error_codes_from_events(initial_decoded)
-    dynamic_chips = generate_dynamic_query_chips(initial_decoded or sample_envelopes, detected_codes, all_sources)
+    dynamic_chips = generate_dynamic_query_chips(initial_decoded or sample_envelopes, all_sources)
 
     # Minimal Investigation Query Input Bar with Crisp "Analyze Log" Button (submit-on-Enter)
     st.subheader("Investigation Query")
     if "operator_query" not in st.session_state:
-        st.session_state["operator_query"] = dynamic_chips[0] if dynamic_chips else "Diagnose all detected errors using loaded error manual"
+        st.session_state["operator_query"] = dynamic_chips[0] if dynamic_chips else "Summarize the retrieved telemetry."
 
     auto_run = st.session_state.pop("auto_run_mvp_analysis", False)
 
@@ -1607,7 +1438,7 @@ def main() -> None:
                 "Investigation Query",
                 value=st.session_state["operator_query"],
                 label_visibility="collapsed",
-                placeholder="Enter investigation question (e.g. Diagnose all detected errors using loaded error manual)...",
+                placeholder="Enter a question about the retrieved telemetry...",
             )
         with col_btn:
             submitted = st.form_submit_button("⚡ Analyze Log", use_container_width=True)
@@ -1763,15 +1594,11 @@ def main() -> None:
             st.stop()
 
     # =========================================================================
-    # STAGE 2: Python Decoding -> Vendor Manual RAG -> Synthesis Output
+    # STAGE 2: Python Decoding -> Knowledge-Base Retrieval -> Synthesis
     # =========================================================================
 
     # Build Grounded Evidence
     evidence = build_evidence(condensed_events, query=query, retrieval=retrieval_res)
-
-    # Match Telemetry Faults against Digested Vendor Manual
-    vendor_manual_matches = enrich_evidence_with_manual(evidence, active_vendor_entries)
-    evidence["vendor_manual_matches"] = vendor_manual_matches
 
     # =========================================================================
     # RAG SYNTHESIS & EPISTEMIC CITATION AUDIT
@@ -1780,7 +1607,7 @@ def main() -> None:
 
     if is_empty_retrieval:
         knowledge_chunks = retrieve_relevant_knowledge(evidence, query, top_k=8)
-        llm_context = build_llm_context(evidence, query, knowledge_chunks, vendor_manual_matches=vendor_manual_matches)
+        llm_context = build_llm_context(evidence, query, knowledge_chunks)
         synthesis = {
             "summary": (
                 f"INSUFFICIENT EVIDENCE: Zero telemetry events were recorded or retrieved within "
@@ -1809,7 +1636,7 @@ def main() -> None:
         )
         model_used = "Pre-Generation Sufficiency Gate (Short-Circuit)"
     else:
-        with st.spinner("Executing Qwen RAG synthesis, vendor manual reasoning & epistemic citation validation..."):
+        with st.spinner("Retrieving knowledge-base references and validating the telemetry-grounded synthesis..."):
             terms_hash = str(hash(tuple(sorted((e.get("event_name") or "") for e in evidence.get("events", [])))))
             knowledge_chunks = cached_retrieve_knowledge(
                 len(evidence.get("events", [])),
@@ -1819,35 +1646,25 @@ def main() -> None:
                 _evidence=evidence,
             )
             ev_hash = str(hash((len(evidence.get("events", [])), query, terms_hash)))
-            vm_hash = str(hash(tuple(vm.get("error_code", "") for vm in vendor_manual_matches)))
             llm_engine_wrapper = get_local_llm_engine()
             with llm_engine_wrapper:
                 synthesis, val_report, model_used = cached_synthesize_and_validate(
                     query,
                     ev_hash,
-                    vm_hash,
                     _evidence=evidence,
-                    _vendor_matches=vendor_manual_matches,
                 )
-            llm_context = build_llm_context(
-                evidence,
-                query,
-                knowledge_chunks,
-                vendor_manual_matches=vendor_manual_matches,
-            )
+            llm_context = build_llm_context(evidence, query, knowledge_chunks)
 
     # =========================================================================
     # SINGLE UNIFIED KPI STRIP (No duplicate rows, text-overflow protected)
     # =========================================================================
     n_events = len(condensed_events)
     raw_retrieved = len(retrieval_res.events)
-    n_faults = sum(1 for e in condensed_events if is_critical_event(getattr(e, 'event_type', 0)))
+    n_faults = sum(1 for e in condensed_events if is_critical_event(e))
     duration_s = max(0.1, span_s)
     is_full = analysis_scope.startswith("Full")
     coverage_val = "Full Dataset" if is_full else f"Manual Window ({span_s:.0f}s)"
     coverage_sub = "100% faults retained" if is_full else ("Truncated" if retrieval_res.truncated else "Exact Slice")
-    rules_val = f"{len(active_vendor_entries)} Rules"
-    rules_sub = f"{len(vendor_manual_matches)} matched"
     ipc_mode = "UDS Daemon" if (source_mode == "Java Telemetry Storage (IPC Engine)" or os.path.exists("/tmp/fss_bridge.sock")) else "Subprocess IPC"
 
     if n_events < raw_retrieved:
@@ -1860,7 +1677,7 @@ def main() -> None:
     _render_kpi_strip([
         ("Events", events_val, events_sub),
         ("Coverage", coverage_val, coverage_sub),
-        ("Error Manual", rules_val, rules_sub),
+        ("Knowledge Base", f"{len(knowledge_chunks)} Chunks", "Retrieved reference documents"),
         ("Storage / IPC", "Java BlockStore", ipc_mode),
         ("Model Runtime", "Online" if model_status["online"] else "Offline", model_status["label"]),
     ])
@@ -1882,12 +1699,11 @@ def main() -> None:
     # =========================================================================
     # 7 CONCISE TABS (Zero Horizontal Scrolling, Domain-Agnostic Source Labels)
     # =========================================================================
-    tab_timeline, tab_gaps, tab_manual, tab_rag, tab_prompt, tab_audit, tab_raw = st.tabs(
+    tab_timeline, tab_gaps, tab_rag, tab_prompt, tab_audit, tab_raw = st.tabs(
         [
             "Timeline",
             "Data Gaps",
-            "Error Codes",
-            "Domain RAG",
+            "Knowledge Base",
             "Prompt",
             "Audit",
             "Raw JSON",
@@ -1947,106 +1763,20 @@ def main() -> None:
         elif not is_empty_retrieval:
             st.success("✅ **Zero Data Gaps**: All events were 100% cleanly decoded with known schemas and enums.")
 
-    # Tab 3: Domain Knowledge RAG
+    # Tab 3: Knowledge Base
     with tab_rag:
-        st.markdown(f"**Retrieved {len(knowledge_chunks)} Domain Documentation Chunk(s) via RAG:**")
+        st.markdown(f"**Retrieved {len(knowledge_chunks)} knowledge_base document chunk(s):**")
         for chunk in knowledge_chunks:
             with st.expander(f"📖 {chunk['title']} (`{chunk['chunk']}`) — explains `{chunk.get('explains', '')}`"):
-                st.markdown(f"**Domain:** `{chunk['domain']}` | **Kind:** `{chunk['kind']}`")
+                st.markdown(f"**Source:** `{chunk.get('source_filename', '')}` | **Kind:** `{chunk['kind']}`")
                 st.markdown(f"> {chunk['content']}")
 
-    # Tab 4: Matched Vendor Error Codes (Dedicated Inspector Tab)
-    with tab_manual:
-        st.markdown(f"### 📖 Matched Vendor Error Codes & Catalog ({len(active_vendor_entries)} Specs Loaded)")
-
-        # Section A: Telemetry Matched Error Codes
-        st.markdown("#### 🎯 Error Codes Matched in Loaded Telemetry Log")
-        if vendor_manual_matches:
-            st.markdown(f"**Found {len(vendor_manual_matches)} matching fault definition(s) in this log:**")
-            for vm in vendor_manual_matches:
-                sev = vm.get("severity", "ERROR").upper()
-                sev_badge_class = "badge-sev-error" if "CRIT" in sev or "ERR" in sev else ("badge-sev-warn" if "WARN" in sev else "badge-sev-info")
-                causes_txt = "; ".join(vm.get("probable_causes", [])) if vm.get("probable_causes") else "Unspecified"
-                actions_txt = "; ".join(vm.get("recommended_actions", [])) if vm.get("recommended_actions") else "Unspecified"
-
-                st.markdown(
-                    f"""
-                    <div class="vendor-error-card severity-{sev.lower()}">
-                        <div class="vendor-error-header">
-                            <span class="vendor-error-code">[{vm.get('doc_chunk_id', vm.get('error_code'))}] {vm.get('error_code')} • {vm.get('title')}</span>
-                            <span class="vendor-error-badge {sev_badge_class}">{sev}</span>
-                        </div>
-                        <div style="font-size: 0.88rem; color: #B5D2FF; margin-bottom: 6px;">
-                            <strong>Subsystem:</strong> {vm.get('subsystem', 'General')} | <strong>Vendor:</strong> {vm.get('vendor', 'Unknown')}
-                        </div>
-                        <div style="font-size: 0.9rem; margin-bottom: 8px;">
-                            <strong>Description:</strong> {vm.get('description', '')}
-                        </div>
-                        <div style="font-size: 0.85rem; color: #8FA0C0; line-height: 1.4;">
-                            <div>⚡ <strong>Probable Causes:</strong> {causes_txt}</div>
-                            <div>🛠️ <strong>Recommended Actions:</strong> {actions_txt}</div>
-                        </div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-        else:
-            st.info("ℹ️ No specific vendor fault codes were triggered in this telemetry interval.")
-
-        st.markdown("---")
-
-        # Section B: Complete Error Catalog Browser
-        st.markdown("#### 📚 Complete Vendor Error-Code Catalog")
-        filter_col1, filter_col2 = st.columns([3, 1])
-        with filter_col1:
-            search_query = st.text_input("Search catalog entries by code, subsystem, or keyword:", placeholder="e.g. EKF, GPS, SUBSYS_14, TIMEOUT")
-        with filter_col2:
-            sev_filter = st.selectbox("Filter Severity", ["ALL", "CRITICAL", "ERROR", "WARNING", "NOTICE"])
-
-        catalog_rows = []
-        for entry in active_vendor_entries:
-            # Filtering
-            if sev_filter != "ALL" and entry.severity.upper() != sev_filter:
-                continue
-            if search_query:
-                q_low = search_query.lower()
-                matches_search = (
-                    q_low in entry.error_code.lower()
-                    or q_low in entry.title.lower()
-                    or q_low in entry.subsystem.lower()
-                    or q_low in entry.description.lower()
-                    or any(q_low in a.lower() for a in entry.aliases)
-                )
-                if not matches_search:
-                    continue
-
-            is_in_telemetry = any(
-                entry.error_code == vm.get("error_code") or entry.doc_chunk_id == vm.get("doc_chunk_id")
-                for vm in vendor_manual_matches
-            )
-
-            catalog_rows.append(
-                {
-                    "Error Code": entry.error_code,
-                    "Subsystem": entry.subsystem,
-                    "Severity": entry.severity,
-                    "Title": entry.title,
-                    "In Telemetry": "✅ DETECTED" if is_in_telemetry else "Indexed",
-                    "Description": entry.description,
-                    "Probable Causes": "; ".join(entry.probable_causes) if entry.probable_causes else "—",
-                    "Recommended Actions": "; ".join(entry.recommended_actions) if entry.recommended_actions else "—",
-                    "RAG Chunk ID": entry.doc_chunk_id,
-                }
-            )
-
-        render_table(catalog_rows)
-
-    # Tab 5: Prompt Context Audit
+    # Tab 4: Prompt Context Audit
     with tab_prompt:
         st.markdown("**Complete Grounded Prompt Context sent to Model:**")
         st.text_area("Audit Trail (fss-evidence/v0 formatting)", llm_context, height=350)
 
-    # Tab 6: Citation Validation Audit (with lossless timestamps)
+    # Tab 5: Citation Validation Audit (with lossless timestamps)
     with tab_audit:
         st.markdown("### Citation Verification & Hallucination Gate Results")
         c1, c2, c3 = st.columns(3)
@@ -2073,17 +1803,23 @@ def main() -> None:
                     }
                 )
             else:
-                # Could be a vendor error manual citation [err-...]
-                matched_vm = next((vm for vm in vendor_manual_matches if vm.get("doc_chunk_id") == cid or vm.get("error_code") == cid), None)
-                if matched_vm:
+                document = next(
+                    (
+                        doc
+                        for doc in knowledge_chunks
+                        if cid in {doc.get("id"), doc.get("chunk")}
+                    ),
+                    None,
+                )
+                if document:
                     audit_rows.append(
                         {
                             "Citation": cid,
-                            "Status": "✅ VERIFIED VENDOR MANUAL",
-                            "Source": matched_vm.get("vendor", "VENDOR"),
-                            "Event Name": matched_vm.get("title", "Vendor Error"),
-                            "Timestamp (UTC)": "Reference Manual",
-                            "Timestamp (uint64 ns)": "Manual Chunk",
+                            "Status": "✅ VERIFIED KNOWLEDGE_BASE",
+                            "Source": document.get("source_filename", "knowledge_base"),
+                            "Event Name": document.get("title", "Knowledge Document"),
+                            "Timestamp (UTC)": "Reference Document",
+                            "Timestamp (uint64 ns)": "N/A",
                         }
                     )
                 else:
@@ -2139,7 +1875,7 @@ def main() -> None:
             for note in val_report.notes:
                 st.markdown(f"- ℹ️ {note}")
 
-    # Tab 7: Raw Evidence JSON (Lossless base-10 uint64 strings)
+    # Tab 6: Raw Evidence JSON (Lossless base-10 uint64 strings)
     with tab_raw:
         safe_evidence = make_lossless_json_safe(evidence)
         st.download_button(

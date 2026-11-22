@@ -802,7 +802,7 @@ def _resolve_source(
     if type(raw_source) is not int or not 0 <= raw_source <= (1 << 32) - 1:
         raise ValueError("source must be 'all' or a valid numeric agent ID")
     explicit = re.search(
-        rf"\b(?:agent|source|drone)\s*(?:id\s*)?#?\s*{raw_source}\b",
+        rf"\b(?:agent|source|node|device|entity|host|service|component|unit|process)\s*(?:id\s*)?#?\s*{raw_source}\b",
         query,
         re.IGNORECASE,
     )

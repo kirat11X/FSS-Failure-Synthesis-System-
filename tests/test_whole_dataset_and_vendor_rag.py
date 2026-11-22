@@ -19,7 +19,6 @@ Covers:
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -34,13 +33,6 @@ from bridge.bin_ingestor import (
     normalize_time_bounds,
 )
 from bridge.citation_auditor import CitationAuditor
-from bridge.error_catalog import (
-    VendorErrorEntry,
-    extract_error_codes_from_events,
-    load_builtin_manual,
-    parse_error_manual,
-)
-from bridge.hybrid_rag import HybridRetriever, enrich_evidence_with_manual
 from bridge.java_retriever import JavaRetriever
 from bridge.sufficiency_gate import SufficiencyStatus, evaluate_sufficiency
 from bridge.synthesizer import (
@@ -60,14 +52,11 @@ APP_PATH = str(ROOT_DIR / "app.py")
 
 
 # =============================================================================
-# Test 1: Upload Caching Across Consecutive Reruns & Vendor Manual Parsing
+# Test 1: Upload Caching Across Consecutive Reruns
 # =============================================================================
 
-def test_bin_and_vendor_manual_caching_across_reruns(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """Test 1: Uploading a .bin file + custom company .txt / .json error-code manual ingests once.
-
-    Hash-cached across 3 consecutive Streamlit reruns without re-translating.
-    """
+def test_bin_caching_across_reruns(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Repeated binary uploads are served from cache without re-translating."""
     cache_dir = tmp_path / "uploads"
     cache_mgr = BinCacheManager(cache_dir)
 
@@ -101,61 +90,6 @@ def test_bin_and_vendor_manual_caching_across_reruns(tmp_path: Path, monkeypatch
         assert cached_rerun, f"Rerun {rerun_idx} should be served from cache without re-translating"
         assert p_rerun == p1
         assert conversion_call_count == 1, f"Rerun {rerun_idx} triggered redundant re-translation!"
-
-    # 2. Test Custom Company .json Manual Parsing
-    company_json_manual = json.dumps([
-        {
-            "error_code": "0x45",
-            "subsystem": "Navigation",
-            "severity": "CRITICAL",
-            "title": "Navigation Error Flag",
-            "description": "Navigation sensor reporting hardware fault condition.",
-            "probable_causes": ["IMU bus failure", "Loss of clock sync"],
-            "recommended_actions": ["RTL immediately", "Check hardware wiring"],
-        },
-        {
-            "error_code": "0x20",
-            "subsystem": "Proximity",
-            "severity": "WARNING",
-            "title": "Proximity Obstacle Warning",
-            "description": "Object breached safe minimum separation.",
-            "probable_causes": ["Formation drift", "External intruder"],
-            "recommended_actions": ["Execute evasive vector"],
-        },
-    ])
-
-    json_entries = parse_error_manual(company_json_manual, "company_errors.json", vendor="Acme")
-    assert len(json_entries) == 2
-    assert json_entries[0].error_code == "0x45"
-    assert json_entries[0].doc_chunk_id == "err-acme-0x45"
-    assert json_entries[1].error_code == "0x20"
-    assert json_entries[1].doc_chunk_id == "err-acme-0x20"
-
-    # 3. Test Custom Company .txt Manual Parsing
-    company_txt_manual = """
-# SkyGuard Systems Technical Error Manual
-## [0x45] Primary Navigation Fault
-- **Subsystem**: Navigation
-- **Severity**: CRITICAL
-- **Description**: Primary navigation filter triggered a critical hardware fault.
-- **Probable Causes**: Optical flow desync; Compass magnetic interference
-- **Recommended Actions**: Disarm motors; Recalibrate compass
-
-## [0x10] Laser Altimeter Timeout
-- **Subsystem**: Rangefinder
-- **Severity**: WARNING
-- **Description**: Rangefinder failed to respond within timing deadline.
-- **Probable Causes**: Ground surface specular absorption; Cable disconnection
-- **Recommended Actions**: Fall back to barometric altitude
-"""
-    txt_entries = parse_error_manual(company_txt_manual, "skyguard_spec.txt", vendor="SkyGuard")
-    assert len(txt_entries) == 2
-    assert any(e.error_code == "0x45" for e in txt_entries)
-    assert any(e.error_code == "0x10" for e in txt_entries)
-    nav_entry = next(e for e in txt_entries if e.error_code == "0x45")
-    assert nav_entry.subsystem == "Navigation"
-    assert nav_entry.doc_chunk_id == "err-skyguard-0x45"
-
 
 # =============================================================================
 # Test 2: Whole-Dataset Retrieval Covers All Events Without Truncation
@@ -258,13 +192,8 @@ def test_retrieval_bounds_invariant_start_le_end():
 # Test 4: General Failure Query Passes Sufficiency Gate & Grounds Citations
 # =============================================================================
 
-def test_general_failure_question_passes_gate_and_grounds_citations():
-    """Test 4: General failure question ("What caused the anomaly in this log?") on dataflash_sample_3.bin.
-
-    Passes the sufficiency gate (no false lockout on entity check), retrieves matched error-code entries
-    from the digested vendor manual, and produces grounded synthesis with valid [ev-...] and [err-...]/[doc-...]
-    citations.
-    """
+def test_general_failure_question_uses_telemetry_grounding():
+    """A general question is analyzed without injecting a separate error catalog."""
     if not SAMPLE_3_BIN.exists():
         pytest.skip(f"Sample file {SAMPLE_3_BIN} not found")
 
@@ -288,44 +217,22 @@ def test_general_failure_question_passes_gate_and_grounds_citations():
     query = "What caused the anomaly in this log?"
     evidence = build_evidence(decoded, query=query, retrieval=ret_res)
 
-    # Ingest vendor manual specifying error event 0x45
-    company_manual = """
-# ArduPilot Fleet Error Catalog
-## [0x45] Hardware Failure Status Error
-- **Subsystem**: Flight Controller
-- **Severity**: CRITICAL
-- **Description**: Subsystem flagged critical hardware status during operation.
-- **Probable Causes**: Main board power fluctuation; Sensor communication timeout
-- **Recommended Actions**: Disarm immediately; Inspect flight controller power distribution
-"""
-    vendor_entries = parse_error_manual(company_manual, "ardupilot_errors.txt", vendor="ArduPilot")
-    vendor_matches = enrich_evidence_with_manual(evidence, vendor_entries)
-    assert len(vendor_matches) >= 1, "Expected error event 0x45 to match vendor manual"
-
-    # 1. Verify Sufficiency Gate: must pass without false lockout on entity check
-    suff = evaluate_sufficiency(evidence, query, vendor_manual_matches=vendor_matches)
+    suff = evaluate_sufficiency(evidence, query)
     assert suff.is_sufficient is True
     assert suff.status == SufficiencyStatus.SUFFICIENT
-    # Ensure question content coverage passed (no missing entity false positive)
-    q_check = next(c for c in suff.checks if c.name == "question_content_coverage")
-    assert q_check.passed is True
 
-    # 2. Run synthesis and citation audit
-    synth = deterministic_synthesize(evidence, query, [], vendor_manual_matches=vendor_matches)
+    synth = deterministic_synthesize(evidence, query, [])
     assert synth["summary"] is not None
-    assert synth["likely_cause"] is not None
 
     auditor = CitationAuditor()
-    report = auditor.audit(synth, evidence, query=query, vendor_manual_matches=vendor_matches)
+    report = auditor.audit(synth, evidence, query=query)
 
     assert report.verdict in ("ACCEPTED", "ACCEPTED_WITH_CORRECTIONS", "VERIFIED_SUPPORTED")
     assert len(report.invalid_citations) == 0, f"Ungrounded citations found: {report.invalid_citations}"
 
-    # Verify presence of valid event citation [ev-...] and vendor citation [err-...]
+    # Any citation must resolve to retrieved telemetry or KB documents.
     has_ev_citation = any(c.startswith("ev-") for c in report.valid_citations)
-    has_err_citation = any(c.startswith("err-") or "0x45" in c for c in report.valid_citations)
     assert has_ev_citation, f"Expected [ev-...] citations in valid citations: {report.valid_citations}"
-    assert has_err_citation, f"Expected [err-...] citation in valid citations: {report.valid_citations}"
 
 
 # =============================================================================

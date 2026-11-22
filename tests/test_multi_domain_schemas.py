@@ -1,4 +1,4 @@
-"""Unit and integration tests for Multi-Domain Schema Packs & Vendor Error-Code Manuals.
+"""Unit and integration tests for multi-domain schema packs.
 
 Tests compliance with:
 - Schema loading & validation (fss_py.schema.load_schema_file)
@@ -7,7 +7,6 @@ Tests compliance with:
 - Trailing opaque bytes quarantine (DecodeStatus.PARTIALLY_DECODED)
 - Truncated / malformed payloads & invalid bools (DecodeStatus.MALFORMED_PAYLOAD)
 - Generalisation rules G01-G04 (identical decoder code across domains)
-- Domain manual parsing for all 5 technical error manuals
 """
 
 from __future__ import annotations
@@ -16,18 +15,12 @@ import struct
 from pathlib import Path
 import pytest
 
-from bridge.error_catalog import (
-    VendorErrorEntry,
-    extract_error_codes_from_events,
-    parse_error_manual,
-)
 from fss_py.decoder import decode, decode_all
 from fss_py.model import DecodeStatus, EventRecord
 from fss_py.schema import SchemaRegistry, load_schema_file
 
 WORKSPACE_ROOT = Path(__file__).resolve().parent.parent
 SCHEMAS_DIR = WORKSPACE_ROOT / "schemas"
-MANUALS_DIR = WORKSPACE_ROOT / "domain_manuals"
 
 
 # ==============================================================================
@@ -488,119 +481,3 @@ def test_g04_dynamic_schema_discovery():
     assert all(len(r) > 0 for r in registries)
 
 
-# ==============================================================================
-# 6. Domain Manual Parsing (All 5 Domain Manuals)
-# ==============================================================================
-
-@pytest.mark.parametrize(
-    "manual_filename, min_entries, expected_codes",
-    [
-        (
-            "microservices_error_codes.md",
-            15,
-            ["HEALTHY", "SATURATED", "POOL_EXHAUSTED", "GATEWAY_TIMEOUT", "SERVICE_UNAVAILABLE", "INTERNAL_SERVER_ERROR"],
-        ),
-        (
-            "industrial_plc_error_codes.md",
-            15,
-            ["NONE", "OVERHEAT", "EMERGENCY_STOP", "PRESSURE_LOSS", "RUNNING", "STARVED", "BLOCKED"],
-        ),
-        (
-            "can_bus_error_codes.md",
-            15,
-            ["NO_FAULT", "SENSOR_COMM_ERROR", "ACTUATOR_FAULT", "PLAUSIBILITY_CHECK_FAILED", "NORMAL", "DISABLED", "FAULT"],
-        ),
-        (
-            "financial_fix_error_codes.md",
-            15,
-            ["TOO_LATE_TO_CANCEL", "UNKNOWN_ORDER", "NEW", "PARTIALLY_FILLED", "FILLED", "CANCELLED", "REJECTED"],
-        ),
-        (
-            "warehouse_robots_error_codes.md",
-            15,
-            ["ROUTE_BLOCKED", "OBSTACLE_DETECTED", "LOW_BATTERY", "ASSIGNED", "IN_PROGRESS", "COMPLETED", "ABORTED", "DELAYED"],
-        ),
-    ],
-)
-def test_parse_domain_manuals(manual_filename: str, min_entries: int, expected_codes: list[str]):
-    """Verify that all 5 domain technical error manuals parse into valid VendorErrorEntry objects."""
-    path = MANUALS_DIR / manual_filename
-    assert path.exists(), f"Manual {path} must exist"
-
-    content = path.read_text(encoding="utf-8")
-    entries = parse_error_manual(content, manual_filename)
-
-    assert len(entries) >= min_entries, f"{manual_filename} produced {len(entries)} entries, expected >= {min_entries}"
-
-    entry_codes = {e.error_code for e in entries}
-    for expected in expected_codes:
-        assert expected in entry_codes, f"Expected code '{expected}' missing from {manual_filename}"
-
-    # Validate schema of each VendorErrorEntry
-    for e in entries:
-        assert isinstance(e, VendorErrorEntry)
-        assert e.error_code
-        assert e.subsystem
-        assert e.severity in ("NOMINAL", "NOTICE", "INFO", "WARNING", "ERROR", "CRITICAL")
-        assert e.title
-        assert len(e.probable_causes) >= 1
-        assert len(e.recommended_actions) >= 1
-        assert e.doc_chunk_id.startswith("err-")
-
-        # Verify to_doc() conversion for RAG indexing
-        doc = e.to_doc()
-        assert doc["kind"] == "vendor-error-code"
-        assert e.error_code in doc["title"]
-        assert doc["content"]
-
-
-def test_extract_and_match_multi_domain_error_codes(
-    microservices_schema: SchemaRegistry,
-    industrial_plc_schema: SchemaRegistry,
-):
-    """Test extracting error codes from decoded multi-domain events and matching against manual entries."""
-    # 1. Decode a DB pool exhausted event
-    payload_pool = struct.pack("<HHHB", 1, 50, 50, 3)
-    ev_pool = decode(
-        EventRecord(source_id=1, timestamp_ns=1_000_000, event_type=0x0201, payload_bytes=payload_pool),
-        microservices_schema,
-    )
-    # 2. Decode an industrial interlock overheat event
-    payload_lock = struct.pack("<HBH", 12, 1, 1)
-    ev_lock = decode(
-        EventRecord(source_id=2, timestamp_ns=2_000_000, event_type=0x0302, payload_bytes=payload_lock),
-        industrial_plc_schema,
-    )
-
-    events = [
-        {
-            "event_type": ev_pool.event_type,
-            "event_name": ev_pool.event_name,
-            "fields": ev_pool.fields,
-            "interpreted_fields": ev_pool.interpreted_fields,
-        },
-        {
-            "event_type": ev_lock.event_type,
-            "event_name": ev_lock.event_name,
-            "fields": ev_lock.fields,
-            "interpreted_fields": ev_lock.interpreted_fields,
-        },
-    ]
-
-    extracted_tokens = extract_error_codes_from_events(events)
-
-    # Verify extracted tokens include both numeric and symbolic labels
-    assert "POOL_EXHAUSTED" in extracted_tokens
-    assert "OVERHEAT" in extracted_tokens
-    assert "DB_POOL_STATUS" in extracted_tokens
-    assert "INTERLOCK" in extracted_tokens
-
-    # Verify matching with parsed manuals
-    ms_entries = parse_error_manual((MANUALS_DIR / "microservices_error_codes.md").read_text(), "microservices.md")
-    plc_entries = parse_error_manual((MANUALS_DIR / "industrial_plc_error_codes.md").read_text(), "industrial_plc.md")
-
-    ms_codes = {e.error_code for e in ms_entries}
-    plc_codes = {e.error_code for e in plc_entries}
-
-    assert "POOL_EXHAUSTED" in ms_codes
-    assert "OVERHEAT" in plc_codes

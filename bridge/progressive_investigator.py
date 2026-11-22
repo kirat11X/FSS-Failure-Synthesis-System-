@@ -26,7 +26,7 @@ from fss_py.model import ALL, DecodedEvent, EventRecord, RetrievalRequest, Retri
 from fss_py.schema import load_schema_file
 
 from bridge.clock_skew_compensator import analyze_clock_skew
-from bridge.hybrid_rag import retrieve_historical_exemplars, retrieve_hybrid_knowledge
+from bridge.hybrid_rag import retrieve_hybrid_knowledge
 from bridge.synthesizer import (
     DEFAULT_NUM_CTX,
     DEFAULT_THINKING_BUDGET,
@@ -212,7 +212,6 @@ class ProgressiveInvestigationResult:
     rejections: list[str]
     evidence: dict[str, Any]
     knowledge: list[dict[str, Any]]
-    exemplars: list[Any]
     synthesis: dict[str, Any]
     validation_report: Any
     model_name: str
@@ -229,13 +228,11 @@ class ProgressiveInvestigator:
         *,
         max_context_requests: int = 1,
         synthesizer_fn: Callable[..., Any] | None = None,
-        vendor_manual_matches: list[dict[str, Any]] | None = None,
     ) -> None:
         self.retriever = retriever
         self.registry = schema_registry
         self.max_context_requests = max_context_requests
         self.synthesizer_fn = synthesizer_fn or synthesize_and_validate
-        self.vendor_manual_matches = vendor_manual_matches or []
 
     def _execute_retrieval(self, req: RetrievalRequest) -> RetrievalResult:
         """Call retriever across various interfaces (method, callable, mock)."""
@@ -258,7 +255,6 @@ class ProgressiveInvestigator:
         initial_request: RetrievalRequest,
         *,
         initial_events: Sequence[EventRecord] | None = None,
-        exemplars_k: int = 3,
         enable_thinking: bool = False,
         thinking_budget: int = DEFAULT_THINKING_BUDGET,
         num_ctx: int = DEFAULT_NUM_CTX,
@@ -269,7 +265,7 @@ class ProgressiveInvestigator:
           1. Round 0: Execute initial retrieval (or take initial_events).
           2. Decode events via registry and build evidence JSON.
           3. Analyze clock skew and populate advisory metadata.
-          4. Retrieve hybrid knowledge and historical incident exemplars.
+          4. Retrieve knowledge_base documents.
           5. Call synthesizer.
           6. If synthesizer emits a context_request and rounds < max_context_requests:
              - Validate context request against bounds and anchors.
@@ -302,10 +298,8 @@ class ProgressiveInvestigator:
 
         if self.synthesizer_fn is synthesize_and_validate:
             knowledge = retrieve_hybrid_knowledge(query, evidence=evidence)
-            exemplars = retrieve_historical_exemplars(query, evidence=evidence, k=exemplars_k)
         else:
             knowledge = []
-            exemplars = []
 
         # Synthesize Round 0
         synthesis, val_report, model_name = self.synthesizer_fn(
@@ -314,8 +308,6 @@ class ProgressiveInvestigator:
             enable_thinking=enable_thinking,
             thinking_budget=thinking_budget,
             effective_num_ctx=num_ctx,
-            exemplars_k=exemplars_k,
-            vendor_manual_matches=self.vendor_manual_matches,
         )
 
         # Check for context_request in synthesis output
@@ -346,8 +338,6 @@ class ProgressiveInvestigator:
                     enable_thinking=enable_thinking,
                     thinking_budget=thinking_budget,
                     effective_num_ctx=num_ctx,
-                    exemplars_k=exemplars_k,
-                    vendor_manual_matches=self.vendor_manual_matches,
                 )
                 break
 
@@ -399,10 +389,9 @@ class ProgressiveInvestigator:
                 if skew_report.clock_caveat:
                     evidence["clock_caveat"] = skew_report.clock_caveat
 
-            # Re-retrieve knowledge and exemplars with updated evidence
+            # Re-retrieve knowledge with updated evidence
             if self.synthesizer_fn is synthesize_and_validate:
                 knowledge = retrieve_hybrid_knowledge(query, evidence=evidence)
-                exemplars = retrieve_historical_exemplars(query, evidence=evidence, k=exemplars_k)
 
             # Final synthesis round (forcing final answer)
             synthesis, val_report, model_name = self.synthesizer_fn(
@@ -411,8 +400,6 @@ class ProgressiveInvestigator:
                 enable_thinking=enable_thinking,
                 thinking_budget=thinking_budget,
                 effective_num_ctx=num_ctx,
-                exemplars_k=exemplars_k,
-                vendor_manual_matches=self.vendor_manual_matches,
             )
 
             # Clear ctx_req_data to terminate loop after max_context_requests (PI-04)
@@ -425,7 +412,6 @@ class ProgressiveInvestigator:
             rejections=rejections,
             evidence=evidence,
             knowledge=knowledge,
-            exemplars=exemplars,
             synthesis=synthesis,
             validation_report=val_report,
             model_name=model_name,
@@ -442,7 +428,6 @@ def investigate_progressive(
     max_context_requests: int = 1,
     initial_events: Sequence[EventRecord] | None = None,
     synthesizer_fn: Callable[..., Any] | None = None,
-    vendor_manual_matches: list[dict[str, Any]] | None = None,
 ) -> ProgressiveInvestigationResult:
     """Convenience functional interface for progressive investigation."""
     investigator = ProgressiveInvestigator(
@@ -450,7 +435,6 @@ def investigate_progressive(
         schema_registry=schema_registry,
         max_context_requests=max_context_requests,
         synthesizer_fn=synthesizer_fn,
-        vendor_manual_matches=vendor_manual_matches,
     )
     return investigator.investigate(
         query=query,

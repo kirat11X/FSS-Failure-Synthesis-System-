@@ -35,7 +35,7 @@ from bridge.citation_auditor import (
     ValidationVerdict,
     validate_synthesis,
 )
-from bridge.synthesizer import DOMAIN_KNOWLEDGE, deterministic_synthesize
+from bridge.synthesizer import deterministic_synthesize
 from fss_py.decoder import decode_all
 from fss_py.evidence import build_evidence
 from fss_py.schema import load_schema_file
@@ -60,15 +60,15 @@ class TestCitationAuditor(unittest.TestCase):
 
     def test_01_tier1_valid_citations_accepted(self):
         """Golden deterministic synthesis with valid citations receives VERIFIED_SUPPORTED badge."""
-        synth = deterministic_synthesize(self.evidence, "Why did drone 474 leave formation?", DOMAIN_KNOWLEDGE)
-        report = self.auditor.audit(synth, self.evidence, knowledge=DOMAIN_KNOWLEDGE)
+        synth = deterministic_synthesize(self.evidence, "Why did drone 474 leave formation?", [])
+        report = self.auditor.audit(synth, self.evidence)
 
         self.assertEqual(report.badge, ValidationBadge.VERIFIED_SUPPORTED)
         self.assertEqual(report.verdict, "ACCEPTED")
         self.assertTrue(report.is_accepted())
-        self.assertIn("ev-1c432aca07e2", report.valid_citations)
-        self.assertIn("ev-2e92ae032f03", report.valid_citations)
-        self.assertIn("ev-722d707b684c", report.valid_citations)
+        retrieved_event_ids = {event.get("event_id") for event in self.evidence["events"]}
+        self.assertTrue(report.valid_citations)
+        self.assertTrue(set(report.valid_citations).issubset(retrieved_event_ids))
         self.assertEqual(report.invalid_citations, [])
 
     def test_02_tier1_malformed_and_hallucinated_citations_rejected(self):
@@ -83,7 +83,7 @@ class TestCitationAuditor(unittest.TestCase):
             "uncertainty": [],
             "data_gaps": [],
         }
-        report = self.auditor.audit(bad_synth, self.evidence, knowledge=DOMAIN_KNOWLEDGE, auto_refine=False)
+        report = self.auditor.audit(bad_synth, self.evidence, auto_refine=False)
 
         self.assertEqual(report.badge, ValidationBadge.UNGROUNDED_HALLUCINATION)
         self.assertEqual(report.verdict, "REJECTED")
@@ -106,7 +106,7 @@ class TestCitationAuditor(unittest.TestCase):
             "uncertainty": [],
             "data_gaps": [],
         }
-        report = self.auditor.audit(deceptive_synth, self.evidence, knowledge=DOMAIN_KNOWLEDGE, auto_refine=False)
+        report = self.auditor.audit(deceptive_synth, self.evidence, auto_refine=False)
 
         self.assertEqual(report.badge, ValidationBadge.ENTITY_MISMATCH)
         self.assertEqual(report.verdict, "REJECTED")
@@ -114,47 +114,42 @@ class TestCitationAuditor(unittest.TestCase):
         self.assertTrue(len(report.entity_bindings) > 0)
         self.assertEqual(report.entity_bindings[0]["actual_entity"], 298)
 
-    def test_04_tier3_atomic_claim_numeric_contradiction(self):
-        """Detects fabricated numeric values contradictory to event fields."""
-        # ev-722d707b684c records min_separation_m: 3.2
-        contradictory_synth = {
-            "summary": "Drone 474 did avoidance [ev-722d707b684c] with a minimum separation of 0.5 m.",
+    def test_04_tier3_citation_must_resolve_to_retrieved_knowledge(self):
+        """A knowledge citation is accepted only when that document was retrieved."""
+        synthesis = {
+            "summary": "The reference says this state is unavailable [doc-kb-reference].",
             "likely_cause": None,
             "confidence": "medium",
-            "contributing_events": [
-                {"source_id": 474, "timestamp": 1791454023050000000, "event_type": "AVOIDANCE", "event_id": "ev-722d707b684c"}
-            ],
+            "contributing_events": [],
             "uncertainty": [],
             "data_gaps": [],
         }
-        report = self.auditor.audit(contradictory_synth, self.evidence, knowledge=DOMAIN_KNOWLEDGE, auto_refine=False)
+        report = self.auditor.audit(synthesis, self.evidence, auto_refine=False)
 
         self.assertEqual(report.badge, ValidationBadge.UNGROUNDED_HALLUCINATION)
-        self.assertEqual(report.verdict, "REJECTED")
-        tier3_res = report.tier_results.get("tier3_atomic_claim_entailment", {})
-        self.assertFalse(tier3_res.get("passed", True))
-        self.assertTrue(any("Contradictory numeric claim" in f["reason"] for f in tier3_res.get("entailment_failures", [])))
+        self.assertIn("doc-kb-reference", report.invalid_citations)
 
-    def test_05_tier3_atomic_claim_status_contradiction(self):
-        """Detects status/enum claims contradictory to event fields."""
-        # ev-2e92ae032f03 records status_name: "LIDAR_TIMEOUT"
-        contradictory_synth = {
-            "summary": "Drone 298 suffered SENSOR_DISCONNECTED [ev-2e92ae032f03].",
+    def test_05_tier3_retrieved_knowledge_citation_is_valid(self):
+        document = {
+            "id": "doc-kb-reference",
+            "chunk": "doc-kb-reference",
+            "title": "State Reference",
+            "content": "The state indicates an unavailable component.",
+        }
+        synthesis = {
+            "summary": "The reference says this state is unavailable [doc-kb-reference].",
             "likely_cause": None,
             "confidence": "medium",
-            "contributing_events": [
-                {"source_id": 298, "timestamp": 1791454023050000000, "event_type": "LIDAR_STATUS", "event_id": "ev-2e92ae032f03"}
-            ],
+            "contributing_events": [],
             "uncertainty": [],
             "data_gaps": [],
         }
-        report = self.auditor.audit(contradictory_synth, self.evidence, knowledge=DOMAIN_KNOWLEDGE, auto_refine=False)
+        report = self.auditor.audit(
+            synthesis, self.evidence, knowledge=[document], auto_refine=False
+        )
 
-        self.assertEqual(report.badge, ValidationBadge.UNGROUNDED_HALLUCINATION)
-        self.assertEqual(report.verdict, "REJECTED")
-        tier3_res = report.tier_results.get("tier3_atomic_claim_entailment", {})
-        self.assertFalse(tier3_res.get("passed", True))
-        self.assertTrue(any("Status contradiction" in f["reason"] for f in tier3_res.get("entailment_failures", [])))
+        self.assertEqual(report.badge, ValidationBadge.VERIFIED_SUPPORTED)
+        self.assertIn("doc-kb-reference", report.valid_citations)
 
     def test_06_tier4_forcebench_relation_overclaim(self):
         """Catches causal escalation ('caused', 'triggered') across unsynchronized sources without hedging."""
@@ -169,7 +164,7 @@ class TestCitationAuditor(unittest.TestCase):
             "uncertainty": [],
             "data_gaps": [],
         }
-        report = self.auditor.audit(overclaim_synth, self.evidence, knowledge=DOMAIN_KNOWLEDGE, auto_refine=False)
+        report = self.auditor.audit(overclaim_synth, self.evidence, auto_refine=False)
 
         self.assertEqual(report.badge, ValidationBadge.FORCE_OVERCLAIM)
         self.assertEqual(report.verdict, "REJECTED")
@@ -189,7 +184,7 @@ class TestCitationAuditor(unittest.TestCase):
             "uncertainty": ["Clocks unsynchronized."],
             "data_gaps": [],
         }
-        report = self.auditor.audit(modality_synth, self.evidence, knowledge=DOMAIN_KNOWLEDGE, auto_refine=False)
+        report = self.auditor.audit(modality_synth, self.evidence, auto_refine=False)
 
         self.assertEqual(report.badge, ValidationBadge.FORCE_OVERCLAIM)
         self.assertEqual(report.verdict, "REJECTED")
@@ -198,7 +193,7 @@ class TestCitationAuditor(unittest.TestCase):
     def test_08_tier4_forcebench_scope_overclaim(self):
         """Catches fleet-wide universal generalizations ('entire fleet', 'all drones') from single node."""
         scope_synth = {
-            "summary": "The entire fleet suffered failure [ev-722d707b684c].",
+            "summary": "All sources suffered failure [ev-722d707b684c].",
             "likely_cause": "System-wide outage.",
             "confidence": "medium",
             "contributing_events": [
@@ -207,7 +202,7 @@ class TestCitationAuditor(unittest.TestCase):
             "uncertainty": [],
             "data_gaps": [],
         }
-        report = self.auditor.audit(scope_synth, self.evidence, knowledge=DOMAIN_KNOWLEDGE, auto_refine=False)
+        report = self.auditor.audit(scope_synth, self.evidence, auto_refine=False)
 
         self.assertEqual(report.badge, ValidationBadge.FORCE_OVERCLAIM)
         self.assertEqual(report.verdict, "REJECTED")
@@ -225,7 +220,7 @@ class TestCitationAuditor(unittest.TestCase):
             "uncertainty": ["Clocks unsynchronized."],
             "data_gaps": [],
         }
-        report = self.auditor.audit(precision_synth, self.evidence, knowledge=DOMAIN_KNOWLEDGE, auto_refine=False)
+        report = self.auditor.audit(precision_synth, self.evidence, auto_refine=False)
 
         self.assertEqual(report.badge, ValidationBadge.FORCE_OVERCLAIM)
         self.assertEqual(report.verdict, "REJECTED")
@@ -241,34 +236,22 @@ class TestCitationAuditor(unittest.TestCase):
             "uncertainty": ["Bypassed LLM generation."],
             "data_gaps": ["[DATA_GAPS_QUARANTINE] Empty window."],
         }
-        report = self.auditor.audit(quarantine_synth, self.evidence, knowledge=DOMAIN_KNOWLEDGE)
+        report = self.auditor.audit(quarantine_synth, self.evidence)
         self.assertEqual(report.badge, ValidationBadge.INSUFFICIENT_EVIDENCE)
         self.assertEqual(report.verdict, "REJECTED")
 
-    def test_11_err_citations_valid(self):
-        """Valid vendor error manual citations ([err-...]) validate cleanly without KeyError."""
-        vendor_matches = [
-            {"id": "err-subsys-2-code-1", "title": "Crash Check Error", "description": "Crash detector triggered."}
-        ]
+    def test_11_non_knowledge_error_catalog_citation_is_rejected(self):
+        """A separately supplied error-catalog ID is not a valid citation source."""
         synth = {
-            "summary": "Drone 474 performed avoidance [ev-722d707b684c] following vendor error alert [err-subsys-2-code-1].",
-            "likely_cause": "Avoidance manoeuvre for collision risk [ev-722d707b684c].",
+            "summary": "An error was reported [err-subsys-2-code-1].",
+            "likely_cause": None,
             "confidence": "medium",
-            "contributing_events": [
-                {"source_id": 474, "timestamp": 1791454023050000000, "event_type": "AVOIDANCE", "event_id": "ev-722d707b684c"}
-            ],
+            "contributing_events": [],
             "uncertainty": [],
             "data_gaps": [],
         }
-        report = self.auditor.audit(
-            synth,
-            self.evidence,
-            knowledge=DOMAIN_KNOWLEDGE,
-            vendor_manual_matches=vendor_matches,
-        )
-        self.assertIn("err-subsys-2-code-1", report.valid_citations)
-        self.assertNotIn("err-subsys-2-code-1", report.invalid_citations)
-        self.assertTrue(report.tier_results["tier1_id_integrity"]["passed"])
+        report = self.auditor.audit(synth, self.evidence, auto_refine=False)
+        self.assertIn("err-subsys-2-code-1", report.invalid_citations)
 
     def test_12_err_citations_hallucinated_rejected(self):
         """Hallucinated vendor error citations ([err-fake]) are caught and rejected."""
@@ -282,7 +265,7 @@ class TestCitationAuditor(unittest.TestCase):
             "uncertainty": [],
             "data_gaps": [],
         }
-        report = self.auditor.audit(synth, self.evidence, knowledge=DOMAIN_KNOWLEDGE, auto_refine=False)
+        report = self.auditor.audit(synth, self.evidence, auto_refine=False)
         self.assertIn("err-fake", report.invalid_citations)
         self.assertEqual(report.badge, ValidationBadge.UNGROUNDED_HALLUCINATION)
 

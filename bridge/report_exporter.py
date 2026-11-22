@@ -68,8 +68,6 @@ def _normalize_report_data(data: Any) -> dict[str, Any]:
     events = evidence.get("events", [])
     data_gaps = evidence.get("data_gaps", [])
     knowledge = d.get("knowledge", [])
-    exemplars = d.get("exemplars", [])
-    vendor_matches = d.get("vendor_matches", [])
 
     return {
         "query": query,
@@ -82,8 +80,6 @@ def _normalize_report_data(data: Any) -> dict[str, Any]:
         "events": events,
         "data_gaps": data_gaps,
         "knowledge": knowledge,
-        "exemplars": exemplars,
-        "vendor_matches": vendor_matches,
         "model": d.get("model", "qwen3-fss-bridge"),
         "report_text": d.get("report", ""),
     }
