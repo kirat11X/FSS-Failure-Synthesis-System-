@@ -5,7 +5,7 @@
 # Launches the integrated end-to-end FSS stack:
 #   1. Process-group cleanup trap & signal handling (SIGTERM, 5s wait, SIGKILL)
 #   2. Verifies JDK 16+ (JEP-380) and Python 3.11+
-#   3. Verifies Java BlockStore bridge freshness vs sources; recompiles if stale
+#   3. Verifies Java Retrieval IPC freshness vs sources; recompiles if stale
 #   4. Verifies editable package installation (pip install -e .)
 #   5. Confirms write permissions on BlockStore storage directory
 #   6. Probes local LLM server (Ollama /api/ps or llama-server /health, context guard)
@@ -205,15 +205,17 @@ ok "Editable package verified (import bridge, fss_py OK)"
 # ------------------------------------------------------------------------------
 # 3. Java BlockStore & Bridge Compilation Freshness
 # ------------------------------------------------------------------------------
-echo "[3/5] Verifying Java BlockStore Bridge Freshness..."
-TARGET_CLASS="bridge/classes/bridge/JavaStoreBridge.class"
+echo "[3/5] Verifying Java Retrieval IPC Freshness..."
+TARGET_CLASS="fss-core/target/classes/Retrieval/RetrievalMain.class"
 NEEDS_REBUILD=0
 
 if [ ! -f "$TARGET_CLASS" ] || [ "${1:-}" = "--rebuild" ]; then
   NEEDS_REBUILD=1
+elif [ ! -f "fss-core/target/dependency-classpath.txt" ]; then
+  NEEDS_REBUILD=1
 else
   # Check if any .java source file is newer than TARGET_CLASS
-  NEWER_SRC="$(find fss-core/src/main/java bridge -maxdepth 2 -name "*.java" -newer "$TARGET_CLASS" 2>/dev/null | head -n 1 || true)"
+  NEWER_SRC="$(find fss-core/src/main/java -name "*.java" -newer "$TARGET_CLASS" 2>/dev/null | head -n 1 || true)"
   if [ -n "$NEWER_SRC" ]; then
     echo "  Detected newer Java source file: $NEWER_SRC; triggering recompilation..."
     NEEDS_REBUILD=1
@@ -221,10 +223,10 @@ else
 fi
 
 if [ "$NEEDS_REBUILD" -eq 1 ]; then
-  echo "  Compiling JavaStoreBridge into bridge/classes..."
-  bash bridge/compile.sh || die "Java bridge compilation failed."
+  echo "  Compiling Java Storage and Retrieval IPC with Maven..."
+  bash bridge/compile.sh || die "Java Storage/Retrieval compilation failed."
 fi
-ok "Java BlockStore Bridge compiled and up-to-date ($TARGET_CLASS)"
+ok "Java Retrieval IPC compiled and up-to-date ($TARGET_CLASS)"
 
 # Confirm write permissions on BlockStore storage directory
 STORE_DIR="$ROOT_DIR/bridge"
@@ -263,13 +265,13 @@ if curl -sf -m 2 --noproxy "127.0.0.1,localhost" "$OLLAMA_URL/api/tags" >/dev/nu
 elif curl -sf -m 2 --noproxy "127.0.0.1,localhost" "http://127.0.0.1:8080/health" >/dev/null 2>&1; then
   ok "llama-server running at http://127.0.0.1:8080"
 else
-  warn "Local LLM server offline — Synthesizer will automatically resolve to Local HF Qwen / Deterministic reasoning."
+  warn "Local LLM server offline — query analysis will fail explicitly until a configured local model is available."
 fi
 
 # ------------------------------------------------------------------------------
 # 5. Streamlit Dashboard Launch & URLs
 # ------------------------------------------------------------------------------
-echo "[5/5] Preparing FSS Modernized 8-Part Streamlit Dashboard..."
+echo "[5/5] Preparing FSS Query-Driven Investigation Dashboard..."
 
 if curl -sf -m 1 --noproxy "127.0.0.1,localhost" "$HEALTH_URL/_stcore/health" >/dev/null 2>&1; then
   echo
@@ -284,10 +286,10 @@ echo "  FAILURE SYNTHESIS SYSTEM (FSS) — ALL SERVICES INITIALIZED"
 echo "================================================================================"
 echo "  Dashboard Access URL:  $URL"
 echo "  Storage Engine:        Java BlockStore (64KB Blocks, CRC-32C, Zero-filled recovery)"
-echo "  Bridge Interface:      JavaStoreBridge (Contract v0 Little-Endian Envelopes)"
+echo "  Bridge Interface:      RetrievalMain (Length-Prefixed JSON IPC)"
 echo "  Decoder & Registry:    Deterministic Payload Unpacking (schemas/drone_v0.yaml)"
-echo "  Qwen RAG Synthesizer:  3-Tier Resolution (Ollama: $OLLAMA_STATUS | HF | Deterministic)"
-echo "  Citation Validator:    Active (16 FSS Hard Rules, Hallucination Gate)"
+echo "  Local LLM:             Ollama status: $OLLAMA_STATUS; no deterministic fallback"
+echo "  Knowledge Base:        knowledge_base/ (local document and structured-data RAG)"
 echo "================================================================================"
 echo "  Quick Test Commands (in another terminal):"
 echo "    - 10-Suite Pytest:        pytest tests/"

@@ -100,6 +100,23 @@ os.environ["OLLAMA_CONTEXT_LENGTH"] = str(OLLAMA_CONTEXT_LENGTH)
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
 LLAMA_SERVER_URL = os.environ.get("LLAMA_SERVER_URL", os.environ.get("LLAMA_CPP_URL", "http://127.0.0.1:8080"))
 
+
+def _inference_timeout_seconds(env_name: str, default: int | None = None) -> float | None:
+    """Return a urllib timeout; set the environment value to 0 or none for no timeout."""
+    raw_value = os.environ.get(env_name)
+    if raw_value is None:
+        return None if default is None else float(default)
+    normalized = raw_value.strip().lower()
+    if normalized in {"", "0", "none", "unlimited", "infinite"}:
+        return None
+    try:
+        value = float(raw_value)
+    except ValueError as exc:
+        raise ValueError(f"{env_name} must be seconds, 0, or none") from exc
+    if value < 0:
+        raise ValueError(f"{env_name} cannot be negative")
+    return value or None
+
 LOCAL_HF_PATH = (
     ""
     if "PYTEST_CURRENT_TEST" in os.environ
@@ -425,6 +442,7 @@ def preflight_budget_guard(
     enable_thinking: bool = False,
     exemplars: Sequence[HistoricalIncident] | None = None,
     vendor_manual_matches: list[dict[str, Any]] | None = None,
+    include_event_ids: bool = True,
 ) -> tuple[dict[str, Any], bool, str]:
     """Pre-flight Python token-budget guard.
 
@@ -445,6 +463,7 @@ def preflight_budget_guard(
         effective_num_ctx=effective_num_ctx,
         _skip_budget_guard=True,
         vendor_manual_matches=vendor_manual_matches,
+        include_event_ids=include_event_ids,
     )
     est_prompt_tokens = estimate_tokens(SYSTEM_PROMPT) + estimate_tokens(test_context)
 
@@ -541,6 +560,7 @@ def preflight_budget_guard(
         effective_num_ctx=effective_num_ctx,
         _skip_budget_guard=True,
         vendor_manual_matches=vendor_manual_matches,
+        include_event_ids=include_event_ids,
     )
     est_prompt_tokens2 = estimate_tokens(SYSTEM_PROMPT) + estimate_tokens(test_context2)
 
@@ -562,6 +582,7 @@ def preflight_budget_guard(
             effective_num_ctx=effective_num_ctx,
             _skip_budget_guard=True,
             vendor_manual_matches=vendor_manual_matches,
+            include_event_ids=include_event_ids,
         )
         est_prompt_tokens2 = estimate_tokens(SYSTEM_PROMPT) + estimate_tokens(test_context2)
 
@@ -614,6 +635,7 @@ def build_llm_context(
     enable_thinking: bool = False,
     _skip_budget_guard: bool = False,
     vendor_manual_matches: list[dict[str, Any]] | None = None,
+    include_event_ids: bool = True,
 ) -> str:
     """Format prompt context with context budgeting, vendor manual matches, and RCACopilot exemplars."""
     # Apply preflight budget guard if not skipped
@@ -628,6 +650,7 @@ def build_llm_context(
             enable_thinking=enable_thinking,
             exemplars=exemplars,
             vendor_manual_matches=vendor_manual_matches,
+            include_event_ids=include_event_ids,
         )
 
     retrieval = evidence.get("retrieval") or {}
@@ -665,10 +688,18 @@ def build_llm_context(
     # ---------------------------------------------------------------------------
     # 1. Condensed Full-Log Telemetry & Extracted Fault Events ([ev-...])
     # ---------------------------------------------------------------------------
+    event_citation_note = (
+        "cite with [ev-...]"
+        if include_event_ids
+        else "cite with source_id, timestamp_ns, and numeric event_type"
+    )
     lines.extend([
         "### 1. CONDENSED FULL-LOG TELEMETRY & EXTRACTED FAULT EVENTS",
-        f"Retrieval: source={retrieval.get('source', 'ALL')}, window [{retrieval.get('t_start_ns', 0)}, {retrieval.get('t_end_ns', 0)}) ns, "
-        f"max_events={retrieval.get('max_events', 100)}, returned={retrieval.get('returned', len(all_events))}, truncated={retrieval.get('truncated', False)}",
+        f"Retrieval: source={retrieval.get('source', 'ALL')}, inclusive window "
+        f"[{retrieval.get('t_start_ns', 0)}, {retrieval.get('t_end_ns', 0)}] ns, "
+        f"max_records={retrieval.get('max_events', 100)}, "
+        f"returned={retrieval.get('returned', len(all_events))}, "
+        f"truncated={retrieval.get('truncated', False)}",
         f"Sources: {', '.join(map(str, sources)) if sources else 'none'}",
         f"Ordering: {evidence.get('ordering', 'Grouped by source_id, sorted by producer timestamp.')}",
     ])
@@ -677,17 +708,41 @@ def build_llm_context(
         lines.append(f"Clock caveat: {clock_caveat}")
 
     if all_events:
-        lines.append("Decoded events (one JSON per line, producer_time_ns on producer's clock, cite with [ev-...]):")
+        lines.append(
+            "Decoded events (one JSON per line, producer_time_ns on producer's clock, "
+            f"{event_citation_note}):"
+        )
         for ev in all_events:
-            entry = {
-                "event_id": ev["event_id"],
-                "source_id": ev["source_id"],
-                "producer_time_ns": ev.get("timestamp_ns") or ev.get("timestamp"),
-                "event": ev.get("event_name") or ev.get("event_type"),
-                "status": ev.get("decode_status"),
-                "fields": ev.get("fields", {}),
-                "interpreted": ev.get("interpreted_fields", []),
-            }
+            if include_event_ids:
+                entry = {
+                    "event_id": ev["event_id"],
+                    "source_id": ev["source_id"],
+                    "producer_time_ns": ev.get("timestamp_ns") or ev.get("timestamp"),
+                    "event": ev.get("event_name") or ev.get("event_type"),
+                    "status": ev.get("decode_status"),
+                    "fields": ev.get("fields", {}),
+                    "interpreted": ev.get("interpreted_fields", []),
+                }
+            else:
+                raw_event_type = ev.get("event_type")
+                event_type = (
+                    int(raw_event_type, 0)
+                    if isinstance(raw_event_type, str)
+                    else raw_event_type
+                )
+                entry = {
+                    "source_id": ev["source_id"],
+                    "timestamp_ns": (
+                        ev.get("timestamp_ns")
+                        if ev.get("timestamp_ns") is not None
+                        else ev.get("timestamp")
+                    ),
+                    "event_type": event_type,
+                    "event_name": ev.get("event_name"),
+                    "decode_status": ev.get("decode_status"),
+                    "fields": ev.get("fields", {}),
+                    "interpreted_fields": ev.get("interpreted_fields", []),
+                }
             lines.append(json.dumps(entry))
     else:
         lines.append("No events recorded or retrieved in the requested time window.")
@@ -731,7 +786,11 @@ def build_llm_context(
             if not str(doc_id).startswith(("doc-", "err-")) and not str(doc_id).startswith("d1_"):
                 doc_id = f"doc-{doc_id}"
             lines.append(
-                f'<document id="{doc.get("id")}" cite_id="{doc_id}" chunk="{doc.get("chunk")}" kind="{doc.get("kind")}" domain="{doc.get("domain")}" title="{doc.get("title")}">'
+                f'<document id="{doc.get("id")}" cite_id="{doc_id}" chunk="{doc.get("chunk")}" '
+                f'kind="{doc.get("kind")}" domain="{doc.get("domain")}" '
+                f'title="{doc.get("title")}" source_filename="{doc.get("source_filename", "")}" '
+                f'section="{doc.get("section", "")}" page_number="{doc.get("page_number", "")}" '
+                f'schema_version="{doc.get("schema_version", "")}">'
             )
             for line in doc.get("content", "").splitlines():
                 lines.append(f"| {line}")
@@ -748,7 +807,11 @@ def build_llm_context(
     gaps = evidence.get("data_gaps", [])
     if gaps:
         for g in gaps:
-            lines.append(f"- [{g.get('kind', 'GAP')}] {g.get('detail')}")
+            detail = g.get("detail")
+            if not include_event_ids and isinstance(detail, str):
+                detail = re.sub(r"\bevent ev-[0-9a-f]{12}\b", "event", detail)
+                detail = re.sub(r"\bev-[0-9a-f]{12}\b", "", detail)
+            lines.append(f"- [{g.get('kind', 'GAP')}] {detail}")
     else:
         lines.append("None: all events decoded without gaps.")
 
@@ -798,40 +861,114 @@ def query_ollama(
     enable_thinking: bool = False,
     thinking_budget: int = DEFAULT_THINKING_BUDGET,
     num_ctx: int = DEFAULT_NUM_CTX,
+    json_schema: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Execute inference via Ollama native /api/chat with strict num_ctx enforcement."""
     sampling_opts = get_qwen3_sampling_params(enable_thinking=enable_thinking, thinking_budget=thinking_budget)
 
     effective_ctx = max(num_ctx, OLLAMA_CONTEXT_LENGTH)
-    body = {
+    base_body: dict[str, Any] = {
         "model": model,
         "stream": False,
-        "format": "json",
+        "format": json_schema or "json",
+        "think": False,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        "options": {
+    }
+
+    ollama_timeout = _inference_timeout_seconds("OLLAMA_TIMEOUT")
+    cpu_fallback_timeout = _inference_timeout_seconds(
+        "OLLAMA_CPU_FALLBACK_TIMEOUT"
+    )
+    cpu_fallback_ctx = int(os.environ.get("OLLAMA_CPU_FALLBACK_CONTEXT", "2048"))
+    attempts = [
+        {
             "num_ctx": effective_ctx,
             "temperature": sampling_opts["temperature"],
             "top_p": sampling_opts["top_p"],
             "top_k": sampling_opts["top_k"],
             "min_p": sampling_opts["min_p"],
             "repeat_penalty": sampling_opts.get("presence_penalty", 1.1),
-        },
-    }
+        }
+    ]
+    if os.environ.get("OLLAMA_DISABLE_CPU_FALLBACK") != "1":
+        attempts.append(
+            {
+                "num_ctx": cpu_fallback_ctx,
+                "num_gpu": 0,
+                "temperature": sampling_opts["temperature"],
+                "top_p": sampling_opts["top_p"],
+                "top_k": sampling_opts["top_k"],
+                "min_p": sampling_opts["min_p"],
+                "repeat_penalty": sampling_opts.get("presence_penalty", 1.1),
+            }
+        )
 
-    req = urllib.request.Request(
-        f"{OLLAMA_URL}/api/chat",
-        data=json.dumps(body).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-    )
-    ollama_timeout = int(os.environ.get("OLLAMA_TIMEOUT", "90"))
-    with urllib.request.urlopen(req, timeout=ollama_timeout) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-        content = data.get("message", {}).get("content", "")
-        parsed, _ = process_qwen3_thinking_output(content, thinking_budget=thinking_budget)
-        return parsed
+    first_http_error: urllib.error.HTTPError | None = None
+    for attempt_index, options in enumerate(attempts):
+        body = dict(base_body)
+        body["options"] = options
+        req = urllib.request.Request(
+            f"{OLLAMA_URL}/api/chat",
+            data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        attempt_timeout = (
+            cpu_fallback_timeout
+            if attempt_index == len(attempts) - 1
+            else ollama_timeout
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=attempt_timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                content = data.get("message", {}).get("content", "")
+                parsed, _ = process_qwen3_thinking_output(
+                    content, thinking_budget=thinking_budget
+                )
+                return parsed
+        except (TimeoutError, urllib.error.URLError) as exc:
+            if isinstance(exc, urllib.error.URLError) and getattr(exc, "reason", None):
+                reason = str(exc.reason)
+            else:
+                reason = str(exc)
+            first_http_error = None
+            if attempt_index == len(attempts) - 1:
+                timeout_label = (
+                    "no Python timeout"
+                    if attempt_timeout is None
+                    else f"{attempt_timeout:g}s"
+                )
+                raise TimeoutError(
+                    f"Ollama exceeded {timeout_label} "
+                    f"(GPU and CPU attempts): {reason}"
+                ) from exc
+            continue
+        except urllib.error.HTTPError as exc:
+            try:
+                error_body = exc.read().decode("utf-8", errors="replace")
+            finally:
+                exc.close()
+            memory_error = any(
+                marker in error_body.lower()
+                for marker in (
+                    "cuda",
+                    "out of memory",
+                    "out-of-memory",
+                    "kv cache",
+                    "cuda malloc",
+                    "unable to allocate",
+                )
+            )
+            first_http_error = exc
+            if attempt_index == len(attempts) - 1 or not memory_error:
+                raise
+            continue
+
+    if first_http_error is not None:
+        raise first_http_error
+    raise RuntimeError("Ollama returned no inference result")
 
 
 def query_llama_server(
@@ -840,10 +977,11 @@ def query_llama_server(
     enable_thinking: bool = False,
     thinking_budget: int = DEFAULT_THINKING_BUDGET,
     ctx_size: int = DEFAULT_NUM_CTX,
+    json_schema: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Execute inference via llama-server with host prefix-caching and Pydantic json_schema."""
     sampling_opts = get_qwen3_sampling_params(enable_thinking=enable_thinking, thinking_budget=thinking_budget)
-    schema = get_synthesis_json_schema()
+    schema = json_schema or get_synthesis_json_schema()
 
     # Byte-identical prefix caching prompt
     full_prompt = f"<|im_start|>system\n{system_prompt}<|im_end|>\n<|im_start|>user\n{user_prompt}<|im_end|>\n<|im_start|>assistant\n"
@@ -865,8 +1003,8 @@ def query_llama_server(
         data=json.dumps(body).encode("utf-8"),
         headers={"Content-Type": "application/json"},
     )
-    ollama_timeout = int(os.environ.get("OLLAMA_TIMEOUT", "90"))
-    with urllib.request.urlopen(req, timeout=ollama_timeout) as resp:
+    llama_timeout = _inference_timeout_seconds("LLAMA_SERVER_TIMEOUT")
+    with urllib.request.urlopen(req, timeout=llama_timeout) as resp:
         data = json.loads(resp.read().decode("utf-8"))
         content = data.get("content", "")
         parsed, _ = process_qwen3_thinking_output(content, thinking_budget=thinking_budget)
@@ -878,17 +1016,20 @@ def query_local_hf(
     user_prompt: str,
     enable_thinking: bool = False,
     thinking_budget: int = DEFAULT_THINKING_BUDGET,
+    raise_errors: bool = False,
+    model_path: str | None = None,
 ) -> dict[str, Any] | None:
     """Execute inference using local HuggingFace weights if transformers is present."""
     try:
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
+        selected_model_path = model_path or LOCAL_HF_PATH
         sampling_opts = get_qwen3_sampling_params(enable_thinking=enable_thinking, thinking_budget=thinking_budget)
 
-        tokenizer = AutoTokenizer.from_pretrained(LOCAL_HF_PATH, local_files_only=True)
+        tokenizer = AutoTokenizer.from_pretrained(selected_model_path, local_files_only=True)
         model = AutoModelForCausalLM.from_pretrained(
-            LOCAL_HF_PATH,
+            selected_model_path,
             local_files_only=True,
             torch_dtype=torch.float32,
             device_map="auto",
@@ -918,6 +1059,8 @@ def query_local_hf(
         parsed, _ = process_qwen3_thinking_output(output, thinking_budget=thinking_budget)
         return parsed
     except Exception:
+        if raise_errors:
+            raise
         return None
 
 

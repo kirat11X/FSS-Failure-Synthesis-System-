@@ -1,29 +1,66 @@
 # Failure Synthesis System (FSS) — Operational Runbook
 
-This runbook provides the operational reference and execution guide for the Failure Synthesis System (FSS). It documents the single-command launch procedure, CLI parameters, supported failure scenarios, 8-part synthesis report structure, and the underlying Java-to-Python runtime linkage.
+This runbook provides operational instructions for the Failure Synthesis System (FSS). The Streamlit dashboard is the query-driven Java Retrieval IPC workflow described below. The separate `run_pipeline.sh` fixture/CLI workflow remains available for legacy test and demonstration scenarios.
 
 ---
 
-## 1. Quick Start: Single-Command Launch
+## 1. Quick Start: Query-Driven Dashboard
 
-To execute the end-to-end linked system (ingesting/opening the durable Java `BlockStore`, executing bounded retrieval, piping wire envelopes to the Python intelligence layer, decoding payloads, and generating the validated 8-part failure synthesis report):
+Start the dashboard, Java Retrieval IPC process, and local RAG workflow with either launcher:
+
+```bash
+./start.sh      # accepts --port, --address, -h
+# or
+./start_all.sh  # underlying orchestrator
+```
+*Access the live dashboard in your browser:* `http://127.0.0.1:8501` (or specify `./start.sh --port 8502`).
+
+The dashboard uses the storage root configured in repository-root `storage.properties`
+(`root=./test-data` by default). Java resolves that path relative to `storage.properties`.
+Populate that configured store before querying; the similarly named `test_data/` directory is
+not selected automatically.
+
+Each question must include a local-time event window no longer than one hour. If the time is
+missing, ambiguous, or longer than an hour, the dashboard asks for clarification instead of
+guessing or clipping the window. Both endpoints are inclusive and are sent to Java as Unix epoch
+nanoseconds. Source defaults to all agents; an event-type filter is used only when unambiguous.
+The same local model handles planning, evidence analysis, and a separate reviewer pass. If no
+configured local model is available, the query fails explicitly rather than using deterministic
+fallback reasoning.
+
+The initial Java retrieval plus follow-ups are limited to three calls total. Each call returns at
+most 5,000 records, retaining the latest records in that requested window and reporting the full
+match count and truncation status. Exact duplicate requests are not sent again.
+
+### Domain and Reference Knowledge
+
+Put reference files under the repository-root `knowledge_base/` directory; indexing is recursive
+and automatic. Supported document files are PDF, DOCX, Markdown, plain text, and HTML. Supported
+structured files are JSON, YAML/YML, and CSV. Document text is extracted, chunked, and indexed
+with the existing local hybrid retriever. Structured data is normalized into searchable chunks.
+Retrieved chunks retain source filename, title, section, page number when applicable, and schema
+version so the final report can show provenance. Add or update files and rerun the query; the local
+index rebuilds when the folder contents change.
+
+Install the application dependencies, including the PDF and DOCX parsers, with:
+
+```bash
+python -m pip install -r requirements.txt -r requirements-app.txt
+```
+
+Payload decoding remains unchanged: Java parses the outer record according to `envelope.cfg`,
+returns the payload as Base64, Python converts it to bytes, and `fss_py/decoder.py` interprets
+those bytes using `schemas/drone_v0.yaml`. The envelope config is not the payload schema.
+
+When running from Windows Git Bash, the launcher also checks the Windows `py -3` launcher if `python` or `python3` is a Microsoft Store alias. It requires Python 3.11 or newer; a Windows virtual environment in `.venv\Scripts` is also recognized.
+
+### Legacy Fixture / CLI Pipeline
+
+The fixture-driven pipeline remains available for legacy test and demonstration scenarios:
 
 ```bash
 ./run_pipeline.sh
 ```
-
-### Web Dashboard & Live Service Launch
-
-To launch the full interactive web application (connecting the Streamlit UI to the Java `BlockStore` engine and Python Qwen RAG pipeline), use either launcher:
-
-```bash
-./start.sh      # Single-command launcher (accepts --port, --address, -h)
-# or
-./start_all.sh  # Underlying hardened orchestrator
-```
-*Access the live dashboard in your browser:* `http://127.0.0.1:8501` (or specify `./start.sh --port 8502`).
-
-When running from Windows Git Bash, the launcher also checks the Windows `py -3` launcher if `python` or `python3` is a Microsoft Store alias. It requires Python 3.11 or newer; a Windows virtual environment in `.venv\Scripts` is also recognized.
 
 ### Docker Deployment
 
@@ -53,7 +90,7 @@ source .venv/bin/activate
 
 # 2. Install dependencies and register bridge and fss_py in editable mode
 pip install --upgrade pip
-pip install -r requirements.txt -r requirements-app.txt
+pip install -r requirements-app.txt
 pip install -e .
 
 # 3. Verify editable installation
@@ -67,12 +104,12 @@ Streamlit is launched canonically via `exec "$VENV_PYTHON" -m streamlit run app.
 ### What Happens Automatically
 When `./run_pipeline.sh` is executed without arguments:
 1. **Environment Configuration**: Sources `fss_env.sh` (or `.env`) to set `JAVA_HOME`, `PYTHONPATH`, classpath, and model paths.
-2. **Bridge Compilation**: Checks for compiled bridge classes in `bridge/classes`; if absent, compiles `bridge/JavaStoreBridge.java` against `fss-core` classes.
+2. **Java Retrieval Compilation**: Compiles the Java sources under `fss-core/src/main/java` with Maven and writes the runtime dependency classpath.
 3. **Store Auto-Provisioning**: Checks for `bridge/store_scenario_298_474.dat`. If not present, ingests `fixtures/golden/scenario_298_474.bin` into a durable Java `BlockStore` formatted in 64 KB zero-filled blocks with CRC-32C Castagnoli integrity.
 4. **Bounded Java Retrieval**: Java `BlockStore` executes `retrieve(source=ALL, [1791454021200000000, 1791454024300000000), max_events=100)`.
 5. **IPC Pipe**: Java spawns Python (`bridge/pipeline_runner.py`) via `ProcessBuilder` and streams canonical binary wire envelopes (Magic `0xF55A`, Version `1`) through standard input.
 6. **Deterministic Decoding**: Python decodes envelopes against `schemas/drone_v0.yaml`, isolating unknown/opaque regions as data gaps.
-7. **Synthesis & Local Model**: The synthesis engine invokes the local offline model (Ollama / HuggingFace local Qwen 2.5 1.5B / deterministic reasoning engine).
+7. **Synthesis & Local Model**: The legacy CLI workflow invokes its configured local model and deterministic fallback; the query-driven dashboard requires a local model and does not fall back.
 8. **Validator & Report Output**: The output validator inspects every cited event ID (`ev-...`), confirms clock skew caveats, and prints the complete 8-part report to stdout.
 
 ---
@@ -379,6 +416,11 @@ JavaRetriever.stop_worker(socket_path="/tmp/fss_bridge.sock")
 ---
 
 ## 8. Local LLM Configuration & Context Budget Guard (`num_ctx >= 16384`)
+
+Inference requests have no Python-side timeout by default. Set
+`OLLAMA_TIMEOUT=90` or `OLLAMA_CPU_FALLBACK_TIMEOUT=300` to restore a finite timeout.
+The values `0`, `none`, `infinite`, or `unlimited` disable a timeout. This controls the
+Python HTTP wait; it does not control Ollama server-side execution or model loading.
 
 FSS synthesizes multi-agent root causes through an 8-part structured diagnostic prompt requiring significant token headroom (system instructions, domain runbooks, timeline telemetry, data gaps, and Qwen3 reasoning traces).
 

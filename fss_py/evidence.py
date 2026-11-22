@@ -96,7 +96,7 @@ def _gaps_for(e: DecodedEvent) -> list[dict[str, Any]]:
         gaps.append(_gap("OPAQUE_BYTES", e, f"{e.unknown_bytes} payload bytes of {where} were not "
                                             f"decoded because their structure is not configured."))
     for key in e.interpreted_fields:
-        if e.fields.get(key) == UNKNOWN_LABEL:
+        if key in e.unmapped_enum_fields:
             gaps.append(_gap("UNMAPPED_ENUM", e, f"In {where}, '{key}' is {UNKNOWN_LABEL}: the "
                                                  f"decoded code has no documented meaning."))
     return gaps

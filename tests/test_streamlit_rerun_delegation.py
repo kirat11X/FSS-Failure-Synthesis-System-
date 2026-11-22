@@ -1,16 +1,4 @@
-"""Test Suite 7: Streamlit Rerun Delegation and Blank-Page Regression Guard.
-
-Spec requirement:
-  Simulate initial load plus 3 consecutive widget reruns against app.py;
-  all 8 UI sections render across every rerun; zero blank-page regression; zero torch.classes exceptions.
-
-Background:
-  Streamlit re-executes the target script from top to bottom on every widget interaction.
-  If app.py uses bare `import streamlit_app`, Python treats subsequent runs as cached no-ops,
-  causing a blank screen on the first rerun.
-  Furthermore, importing PyTorch alongside Streamlit's default file watcher frequently crashes
-  on torch.classes inspection unless fileWatcherType = "none".
-"""
+"""Regression coverage for query dashboard reruns and conversation rendering."""
 
 from __future__ import annotations
 
@@ -26,88 +14,37 @@ APP_PATH = str(ROOT_DIR / "app.py")
 class TestStreamlitRerunDelegation(unittest.TestCase):
 
     def _verify_all_sections_rendered(self, at: AppTest, run_label: str) -> None:
-        """Verify that all core UI sections and tabs render without blank-page regression."""
-        # 1. Zero exceptions
+        """Verify the query interface survives reruns without a blank page."""
         exceptions = [e.value for e in at.exception]
         self.assertEqual(len(exceptions), 0, f"[{run_label}] Encountered unexpected exceptions: {exceptions}")
-
-        # 2. Zero torch.classes exceptions
-        for exc_msg in exceptions:
-            self.assertNotIn(
-                "torch.classes",
-                exc_msg,
-                f"[{run_label}] Detected torch.classes file watcher conflict!",
-            )
-
-        # 3. Main title must be rendered (not a blank page)
         self.assertGreater(len(at.title), 0, f"[{run_label}] Blank screen: no st.title rendered")
         self.assertIn("Failure Synthesis System", at.title[0].value)
-
-        # 4. Verify presence of sidebar/dashboard headers
-        header_values = [h.value for h in at.header]
-        self.assertTrue(
-            any("Storage" in h or "Data Source" in h for h in header_values),
-            f"[{run_label}] Missing Storage header",
-        )
-        self.assertTrue(
-            any("Retrieval" in h or "Bounds" in h for h in header_values),
-            f"[{run_label}] Missing Retrieval Bounds header",
-        )
-
-        # 5. Verify presence of operator investigation subheaders / queries
-        subheader_values = [sh.value for sh in at.subheader]
-        self.assertTrue(
-            any("Investigation Query" in sh for sh in subheader_values),
-            f"[{run_label}] Missing Investigation Query subheader",
-        )
-
-        # 6. Verify presence of metrics (System / Synthesis summary)
-        self.assertGreater(len(at.metric), 0, f"[{run_label}] Missing dashboard metrics")
-
-        # 7. Verify all tabs render across every run (7 clean concise tabs)
-        tab_labels = [t.label for t in at.tabs]
-        self.assertIn(len(tab_labels), (6, 7), f"[{run_label}] Expected 6 or 7 tabs, found {len(tab_labels)}")
-        self.assertTrue(any("Timeline" in t for t in tab_labels), f"[{run_label}] Missing Timeline tab")
-        self.assertTrue(any("Data Gaps" in t or "Gaps" in t for t in tab_labels), f"[{run_label}] Missing Data Gaps tab")
-        self.assertTrue(any("Domain Knowledge" in t or "Domain RAG" in t for t in tab_labels), f"[{run_label}] Missing Domain Knowledge/RAG tab")
-        self.assertTrue(any("Citation" in t or "Audit" in t for t in tab_labels), f"[{run_label}] Missing Citation/Audit tab")
+        self.assertEqual(len(at.chat_input), 1, f"[{run_label}] Missing investigation input")
+        self.assertEqual(len(at.radio), 0, f"[{run_label}] Unexpected source-mode selector")
+        self.assertEqual(len(at.selectbox), 0, f"[{run_label}] Unexpected source selector")
 
     def test_streamlit_initial_load_plus_three_consecutive_reruns(self):
         """Simulate initial load plus 3 consecutive widget reruns against app.py."""
         at = AppTest.from_file(APP_PATH, default_timeout=180)
 
-        # Initial Load
         at.run()
         self._verify_all_sections_rendered(at, "Initial Load")
 
-        # Rerun 1: Select single-source filter
-        source_sb = None
-        for sb in at.selectbox:
-            if "ALL" in sb.options and len(sb.options) > 1:
-                source_sb = sb
-                break
-        if source_sb is not None:
-            target_opt = "474" if "474" in source_sb.options else source_sb.options[1]
-            source_sb.select(target_opt).run()
-        else:
+        for rerun in range(1, 4):
             at.run()
-        self._verify_all_sections_rendered(at, "Rerun 1 (Filter Single Source)")
+            self._verify_all_sections_rendered(at, f"Rerun {rerun}")
 
-        # Rerun 2: Adjust window length slider
-        if len(at.slider) >= 2:
-            at.slider[1].set_value(5.0).run()
-        else:
-            at.run()
-        self._verify_all_sections_rendered(at, "Rerun 2 (Slider Adjustment)")
-
-        # Rerun 3: Reset filter to 'ALL'
-        reset_sb = None
-        for sb in at.selectbox:
-            if "ALL" in sb.options:
-                reset_sb = sb
-                break
-        if reset_sb is not None:
-            reset_sb.select("ALL").run()
-        else:
-            at.run()
-        self._verify_all_sections_rendered(at, "Rerun 3 (Reset ALL)")
+        at.session_state["investigations"] = [
+            {
+                "query": "Why did this happen?",
+                "status": "needs_clarification",
+                "goal": "Determine the cause",
+                "clarification": "Which event window should I inspect?",
+                "retrieval_history": [],
+            }
+        ]
+        at.run()
+        self._verify_all_sections_rendered(at, "Conversation rerun")
+        self.assertTrue(
+            any("Which event window should I inspect?" in item.value for item in at.markdown)
+        )

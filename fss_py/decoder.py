@@ -29,10 +29,18 @@ def decode(record: EventRecord, registry: SchemaRegistry) -> DecodedEvent:
                             decode_status=DecodeStatus.UNKNOWN_EVENT_TYPE, fields={},
                             interpreted_fields=[], unknown_bytes=len(payload), reason=None,
                             warnings=[])
+    if schema.strict_payload_length and len(payload) != schema.payload_length:
+        return _malformed(
+            common,
+            schema,
+            f"payload has {len(payload)} bytes; schema requires exactly "
+            f"{schema.payload_length}",
+        )
 
     fields: dict[str, Any] = {}
     interpreted: list[str] = []
     warnings: list[str] = []
+    unmapped_enum_fields: list[str] = []
     for f in schema.fields:
         if f.offset + f.size > len(payload):
             return _malformed(common, schema, f"field '{f.name}' needs bytes "
@@ -52,14 +60,17 @@ def decode(record: EventRecord, registry: SchemaRegistry) -> DecodedEvent:
             warnings.append(f"field '{f.name}' decoded to a non-finite value ({value})")
         fields[f.name] = value
         if f.enum_map is not None:
-            fields[f.enum_field] = _enum_label(f, value, warnings)
+            if f.enum_field is None:
+                raise RuntimeError(f"schema field {f.name!r} has an enum without an output field")
+            fields[f.enum_field] = _enum_label(f, value, warnings, unmapped_enum_fields)
             interpreted.append(f.enum_field)
 
     unknown = len(payload) - sum(f.size for f in schema.fields)
     status = DecodeStatus.SUCCESS if unknown == 0 else DecodeStatus.PARTIALLY_DECODED
     return DecodedEvent(**common, event_name=schema.name, schema_version=schema.version,
                         decode_status=status, fields=fields, interpreted_fields=interpreted,
-                        unknown_bytes=unknown, reason=None, warnings=warnings)
+                        unknown_bytes=unknown, reason=None, warnings=warnings,
+                        unmapped_enum_fields=unmapped_enum_fields)
 
 
 def decode_all(records: Iterable[EventRecord], registry: SchemaRegistry) -> list[DecodedEvent]:
@@ -73,10 +84,18 @@ def _malformed(common: dict, schema: EventSchema, reason: str) -> DecodedEvent:
                         reason=reason, warnings=[])
 
 
-def _enum_label(f: FieldDef, value: int, warnings: list[str]) -> str:
+def _enum_label(
+    f: FieldDef,
+    value: int,
+    warnings: list[str],
+    unmapped_enum_fields: list[str],
+) -> str:
+    if f.enum_map is None or f.enum_field is None:
+        raise RuntimeError(f"schema field {f.name!r} has an incomplete enum definition")
     label = f.enum_map.get(value)
     if label is None:
         warnings.append(f"{f.name}={value} has no mapping in enum '{f.enum}'")
+        unmapped_enum_fields.append(f.enum_field)
         return UNKNOWN_LABEL
     return label
 

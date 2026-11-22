@@ -1,0 +1,95 @@
+
+# Failure Synthesis System
+# Deployment-specific telemetry payload schema registry
+#
+# Edit this file to match the telemetry produced by your deployment.
+# Java ingestion stores payload bytes unchanged.
+# Python uses these definitions to decode them.
+#
+# Byte order: little-endian
+# Offsets: zero-based
+# Payload lengths: exact byte counts
+
+schema_version: "1.0"
+deployment: "drone_swarm_v1"
+
+defaults:
+  byte_order: little
+  offset_base: 0
+  strict_payload_length: true
+
+events:
+
+  # -----------------------------------------
+  # Event 1: Formation Status
+  # -----------------------------------------
+  1:
+    name: FORMATION_STATUS
+    description: >
+      Describes an agent's current formation membership
+      and identifies its formation leader.
+
+    payload_length: 4
+
+    fields:
+      - name: formation_state
+        type: uint8
+        offset: 0
+        description: Current formation state.
+        enum:
+          0: UNKNOWN
+          1: IN_FORMATION
+          2: FORMATION_LOST
+          3: REJOINING
+
+      - name: formation_id
+        type: uint8
+        offset: 1
+        description: Formation identifier.
+
+      - name: leader_id
+        type: uint16
+        offset: 2
+        description: ID of the formation leader.
+
+  # -----------------------------------------
+  # Event 2: Navigation and Avoidance Status
+  # -----------------------------------------
+  2:
+    name: NAVIGATION_AVOIDANCE_STATUS
+    description: >
+      Describes an agent's navigation state and
+      collision-avoidance activity.
+
+    payload_length: 12
+
+    fields:
+      - name: navigation_state
+        type: uint8
+        offset: 0
+        description: Current navigation state.
+        enum:
+          0: NORMAL
+          1: DEVIATING
+          2: EMERGENCY_MANEUVER
+          3: RETURNING_TO_FORMATION
+
+      - name: avoidance_active
+        type: bool
+        offset: 1
+        description: Whether collision avoidance is active.
+
+      - name: reserved
+        type: uint16
+        offset: 2
+        description: Reserved field. No semantic interpretation.
+
+      - name: minimum_separation_m
+        type: float32
+        offset: 4
+        description: Minimum separation distance in metres.
+
+      - name: heading_change_deg
+        type: float32
+        offset: 8
+        description: Heading change in degrees.

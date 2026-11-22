@@ -14,7 +14,6 @@ Engineered against:
 from __future__ import annotations
 
 import base64
-import fcntl
 import json
 import os
 import shutil
@@ -1302,7 +1301,7 @@ class JavaRetriever:
                     timeout=self.timeout,
                 )
             finally:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                _unlock_sidecar_file(lock_file)
 
         if code != 0:
             err_msg = stderr.decode("utf-8", errors="replace")

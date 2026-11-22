@@ -56,7 +56,7 @@ from fss_py.contract import UNKNOWN_LABEL
 from fss_py.decoder import decode_all
 from fss_py.evidence import build_evidence
 from fss_py.model import ALL, EventRecord, RetrievalRequest, RetrievalRequestError, RetrievalResult
-from fss_py.schema import load_schema_file
+from fss_py.schema import DEFAULT_SCHEMA_PATH, SchemaError, load_schema_file
 from fss_py.wire import iter_envelopes
 
 from bridge.auto_unseen_simulator import (
@@ -114,7 +114,7 @@ from bridge.synthesizer import (
     synthesize_and_validate,
 )
 
-SCHEMA_PATH = ROOT / "schemas" / "drone_v0.yaml"
+SCHEMA_PATH = DEFAULT_SCHEMA_PATH
 GOLDEN_DIR = ROOT / "fixtures" / "golden"
 BRIDGE_DIR = ROOT / "bridge"
 IRL_DIR = ROOT / "test_data" / "irl"
@@ -1074,6 +1074,11 @@ def main() -> None:
         layout="wide",
         initial_sidebar_state="expanded",
     )
+    try:
+        get_schema_registry()
+    except (OSError, SchemaError) as exc:
+        st.error(f"Payload schema configuration error: {exc}")
+        st.stop()
 
     # Inject Minimalist Research-Grade CRT Interface Theme
     if CSS_PATH.exists():

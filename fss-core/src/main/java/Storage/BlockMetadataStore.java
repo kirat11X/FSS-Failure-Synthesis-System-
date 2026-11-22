@@ -15,35 +15,13 @@ public final class BlockMetadataStore implements AutoCloseable {
     private final FileChannel channel;
     private final int blockSize;
 
-    public static int detectBlockSize(Path path, int fallbackBlockSize) {
-        if (path == null || !java.nio.file.Files.exists(path)) return fallbackBlockSize;
-        try (FileChannel fc = FileChannel.open(path, StandardOpenOption.READ)) {
-            if (fc.size() >= (long) RECORD_SIZE * 2) {
-                ByteBuffer b = ByteBuffer.allocate(RECORD_SIZE * 2).order(ByteOrder.BIG_ENDIAN);
-                fc.read(b, 0);
-                b.flip();
-                b.position(RECORD_SIZE); // Jump to record 1 (blockId 1)
-                long bId = b.getLong();
-                long off = b.getLong();
-                if (bId > 0 && off > 0 && off % bId == 0) {
-                    long candidate = off / bId;
-                    if (candidate > 0 && candidate <= 64 * 1024 * 1024) {
-                        return (int) candidate;
-                    }
-                }
-            }
-        } catch (Exception ignored) {}
-        return fallbackBlockSize;
-    }
-
     public BlockMetadataStore(Path path, int blockSize) throws IOException {
         channel = FileChannel.open(path,
                 StandardOpenOption.CREATE,
                 StandardOpenOption.READ,
                 StandardOpenOption.WRITE,
                 StandardOpenOption.DSYNC);
-        int detected = detectBlockSize(path, blockSize);
-        this.blockSize = (detected > 0) ? detected : blockSize;
+        this.blockSize = blockSize;
     }
 
     public synchronized void write(BlockMetadata metadata) throws IOException {

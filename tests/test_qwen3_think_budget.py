@@ -8,6 +8,9 @@ Spec requirement:
 from __future__ import annotations
 
 import json
+import io
+import urllib.error
+import urllib.request
 import pytest
 from bridge.synthesizer import (
     DEFAULT_THINKING_BUDGET,
@@ -21,6 +24,135 @@ from bridge.synthesizer import (
     process_qwen3_thinking_output,
     validate_synthesis_schema,
 )
+
+
+def test_ollama_cpu_fallback_is_used_after_cuda_oom(monkeypatch):
+    from bridge import synthesizer
+
+    attempts: list[dict] = []
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b'{"message":{"content":"{\\"ok\\":true}"}}'
+
+    def fake_urlopen(req, timeout):
+        body = json.loads(req.data.decode("utf-8"))
+        attempts.append(body["options"])
+        if len(attempts) == 1:
+            raise urllib.error.HTTPError(
+                req.full_url,
+                500,
+                "Internal Server Error",
+                {},
+                io.BytesIO(b'{"error":"cudaMalloc failed: out of memory"}'),
+            )
+        return _Response()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    result = synthesizer.query_ollama(
+        "qwen3:4b",
+        "Return JSON only.",
+        "Return an object.",
+        json_schema={
+            "type": "object",
+            "properties": {"ok": {"type": "boolean"}},
+            "required": ["ok"],
+            "additionalProperties": False,
+        },
+    )
+
+    assert result is not None
+    assert result["ok"] is True
+    assert attempts[0]["num_ctx"] >= synthesizer.DEFAULT_NUM_CTX
+    assert attempts[1]["num_gpu"] == 0
+    assert attempts[1]["num_ctx"] == int(
+        __import__("os").environ.get("OLLAMA_CPU_FALLBACK_CONTEXT", "2048")
+    )
+
+
+def test_ollama_cpu_fallback_is_used_after_timeout(monkeypatch):
+    from bridge import synthesizer
+
+    attempts: list[dict] = []
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b'{"message":{"content":"{\\"ok\\":true}"}}'
+
+    def fake_urlopen(req, timeout):
+        body = json.loads(req.data.decode("utf-8"))
+        assert body["think"] is False
+        attempts.append(body["options"])
+        if len(attempts) == 1:
+            raise TimeoutError("first Ollama attempt timed out")
+        return _Response()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    result = synthesizer.query_ollama(
+        "qwen3:4b",
+        "Return JSON only.",
+        "Return an object.",
+        json_schema={
+            "type": "object",
+            "properties": {"ok": {"type": "boolean"}},
+            "required": ["ok"],
+            "additionalProperties": False,
+        },
+    )
+
+    assert result is not None
+    assert result["ok"] is True
+    assert attempts[1]["num_gpu"] == 0
+
+
+def test_ollama_timeout_can_be_disabled(monkeypatch):
+    from bridge import synthesizer
+
+    monkeypatch.setenv("OLLAMA_TIMEOUT", "0")
+    monkeypatch.setenv("OLLAMA_CPU_FALLBACK_TIMEOUT", "none")
+    seen_timeouts: list[object] = []
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b'{"message":{"content":"{\\"ok\\":true}"}}'
+
+    def fake_urlopen(req, timeout):
+        seen_timeouts.append(timeout)
+        return _Response()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    result = synthesizer.query_ollama(
+        "qwen3:4b",
+        "Return JSON only.",
+        "Return an object.",
+        json_schema={
+            "type": "object",
+            "properties": {"ok": {"type": "boolean"}},
+            "required": ["ok"],
+            "additionalProperties": False,
+        },
+    )
+
+    assert result is not None
+    assert seen_timeouts == [None]
 
 
 def test_qwen3_sampling_params_thinking_vs_non_thinking():

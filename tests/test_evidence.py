@@ -3,10 +3,11 @@
 import json
 
 from conftest import GOLDEN, expected_decoded
-from fss_py.decoder import decode_all
+from fss_py.decoder import decode, decode_all
 from fss_py.evidence import ORDERING_NOTE, build_evidence
 from fss_py.model import ALL, EventRecord
 from fss_py.retriever import MockRetriever
+from fss_py.schema import DEFAULT_SCHEMA_PATH, load_schema_file
 
 T0 = 1_791_454_020_000_000_000
 SEC = 1_000_000_000
@@ -65,6 +66,14 @@ def test_gap_kinds_for_each_edge_case(registry):
     assert kinds(evidence_for(registry, "malformed_truncated")) == ["MALFORMED_PAYLOAD"] * 2
     assert kinds(evidence_for(registry, "unknown_enum")) == ["UNMAPPED_ENUM"]
     assert kinds(evidence_for(registry, "clock_skew_pair")) == []
+
+
+def test_explicit_unknown_enum_label_is_not_reported_as_unmapped():
+    registry = load_schema_file(DEFAULT_SCHEMA_PATH)
+    event = EventRecord(298, T0, 1, bytes([0, 7, 42, 0]))
+    evidence = build_evidence([decode(event, registry)])
+    assert evidence["events"][0]["fields"]["formation_state_name"] == "UNKNOWN"
+    assert "UNMAPPED_ENUM" not in kinds(evidence)
 
 
 def test_malformed_event_carries_reason_but_no_values(registry):

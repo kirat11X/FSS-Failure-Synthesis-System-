@@ -24,13 +24,28 @@ PRIMITIVES: dict[str, tuple[int, str]] = {
     "f32": (4, "f"), "f64": (8, "d"),
     "bool": (1, "B"),
 }
+TYPE_ALIASES = {
+    "uint8": "u8", "uint16": "u16", "uint32": "u32", "uint64": "u64",
+    "int8": "i8", "int16": "i16", "int32": "i32", "int64": "i64",
+    "float32": "f32", "float64": "f64",
+}
 INTEGER_TYPES = frozenset({"u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64"})
 ENDIANS = {"little": "<", "big": ">"}
+DEFAULT_SCHEMA_PATH = Path(__file__).resolve().parent.parent / "config" / "payload_schemas.yaml"
 
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _FIELD_KEYS = {"name", "offset", "type", "size", "endian", "enum", "enum_field"}
-_EVENT_KEYS = {"name", "version", "fields"}
+_EVENT_KEYS = {"name", "version", "fields", "payload_length", "strict_payload_length"}
 _TOP_KEYS = {"schema_set", "enums", "event_types"}
+_PAYLOAD_TOP_KEYS = {"schema_version", "deployment", "defaults", "enums", "events"}
+_PAYLOAD_DEFAULT_KEYS = {"byte_order", "offset_base", "strict_payload_length"}
+_PAYLOAD_EVENT_KEYS = {
+    "name", "description", "payload_length", "strict_payload_length", "byte_order", "fields",
+}
+_PAYLOAD_FIELD_KEYS = {
+    "name", "type", "offset", "size", "endian", "byte_order", "description", "enum",
+    "enum_field",
+}
 
 
 class SchemaError(ValueError):
@@ -57,8 +72,10 @@ class FieldDef:
 class EventSchema:
     event_type: int
     name: str
-    version: int
+    version: int | str
     fields: tuple[FieldDef, ...]  # sorted by offset
+    payload_length: int | None = None
+    strict_payload_length: bool = False
 
 
 class SchemaRegistry:
@@ -83,6 +100,11 @@ class SchemaRegistry:
             return self._by_name[name]
         except KeyError:
             raise KeyError(f"no event type named {name!r} in schema") from None
+
+    @property
+    def event_schemas(self) -> tuple[EventSchema, ...]:
+        """Return configured event types for query planning and user-facing labels."""
+        return tuple(self._by_type.values())
 
     def __contains__(self, event_type: object) -> bool:
         return event_type in self._by_type
@@ -236,7 +258,14 @@ def _parse_event(type_id: object, raw: object,
     _only_keys(raw, _EVENT_KEYS, where)
     name = _require_ident(raw.get("name"), f"{where} name")
     where = f"{where} ({name})"
-    version = _require_int(raw.get("version"), f"{where} version", 0, U32_MAX)
+    raw_version = raw.get("version")
+    if _is_int(raw_version):
+        version: int | str = _require_int(raw_version, f"{where} version", 0, U32_MAX)
+    elif isinstance(raw_version, str) and raw_version.strip():
+        version = raw_version
+    else:
+        raise SchemaError(f"{where} version must be an integer or non-empty string, "
+                          f"got {raw_version!r}")
     raw_fields = raw.get("fields")
     if not isinstance(raw_fields, list):
         raise SchemaError(f"{where}: fields must be a list (it may be empty)")
@@ -255,12 +284,28 @@ def _parse_event(type_id: object, raw: object,
         if a.offset + a.size > b.offset:
             raise SchemaError(f"{where}: fields {a.name!r} (bytes {a.offset}..{a.offset + a.size - 1})"
                               f" and {b.name!r} (bytes {b.offset}..{b.offset + b.size - 1}) overlap")
-    return EventSchema(event_type, name, version, tuple(fields))
+    payload_length = raw.get("payload_length")
+    if payload_length is not None:
+        payload_length = _require_int(payload_length, f"{where} payload_length", 0, MAX_PAYLOAD_LEN)
+        if fields and fields[-1].offset + fields[-1].size > payload_length:
+            last = fields[-1]
+            raise SchemaError(f"{where}: field {last.name!r} ends at byte "
+                              f"{last.offset + last.size - 1}, beyond payload_length "
+                              f"{payload_length}")
+    strict_payload_length = raw.get("strict_payload_length", False)
+    if type(strict_payload_length) is not bool:
+        raise SchemaError(f"{where} strict_payload_length must be a boolean")
+    if strict_payload_length and payload_length is None:
+        raise SchemaError(f"{where}: strict_payload_length requires payload_length")
+    return EventSchema(event_type, name, version, tuple(fields), payload_length,
+                       strict_payload_length)
 
 
 def parse_schema(doc: Any) -> SchemaRegistry:
     if not isinstance(doc, dict):
         raise SchemaError("schema document must be a mapping")
+    if "events" in doc:
+        return _parse_payload_schema(doc)
     _only_keys(doc, _TOP_KEYS, "top level")
     schema_set = doc.get("schema_set")
     if schema_set is not None and not isinstance(schema_set, str):
@@ -270,3 +315,156 @@ def parse_schema(doc: Any) -> SchemaRegistry:
     if not isinstance(event_types, dict) or not event_types:
         raise SchemaError("event_types must be a non-empty mapping of event_type id -> definition")
     return SchemaRegistry((_parse_event(k, v, enums) for k, v in event_types.items()), schema_set)
+
+
+def _parse_payload_schema(doc: dict[str, Any]) -> SchemaRegistry:
+    _only_keys(doc, _PAYLOAD_TOP_KEYS, "top level")
+
+    schema_version = doc.get("schema_version")
+    if not isinstance(schema_version, str) or not schema_version.strip():
+        raise SchemaError("schema_version must be a non-empty string")
+    deployment = doc.get("deployment")
+    if not isinstance(deployment, str) or not deployment.strip():
+        raise SchemaError("deployment must be a non-empty string")
+
+    defaults = doc.get("defaults", {})
+    if not isinstance(defaults, dict):
+        raise SchemaError("defaults must be a mapping")
+    _only_keys(defaults, _PAYLOAD_DEFAULT_KEYS, "defaults")
+    default_byte_order = defaults.get("byte_order", "little")
+    if not isinstance(default_byte_order, str) or default_byte_order not in ENDIANS:
+        raise SchemaError("defaults byte_order must be 'little' or 'big'")
+    offset_base = _require_int(defaults.get("offset_base", 0), "defaults offset_base", 0, 1)
+    default_strict_length = defaults.get("strict_payload_length", True)
+    if type(default_strict_length) is not bool:
+        raise SchemaError("defaults strict_payload_length must be a boolean")
+
+    enum_maps = _parse_payload_enums(doc.get("enums"))
+    raw_events = doc.get("events")
+    if not isinstance(raw_events, dict) or not raw_events:
+        raise SchemaError("events must be a non-empty mapping of event id -> definition")
+
+    normalized_events: list[EventSchema] = []
+    seen_event_ids: set[int] = set()
+    for type_id, raw_event in raw_events.items():
+        event_type = _require_int(type_id, f"event type id {type_id!r}", 0, U32_MAX)
+        if event_type in seen_event_ids:
+            raise SchemaError(f"duplicate event_type 0x{event_type:X}")
+        seen_event_ids.add(event_type)
+        where = f"event_type 0x{event_type:X}"
+        if not isinstance(raw_event, dict):
+            raise SchemaError(f"{where}: definition must be a mapping")
+        _only_keys(raw_event, _PAYLOAD_EVENT_KEYS, where)
+        if "description" in raw_event and not isinstance(raw_event["description"], str):
+            raise SchemaError(f"{where} description must be a string")
+        name = _require_ident(raw_event.get("name"), f"{where} name")
+        payload_length = _require_int(raw_event.get("payload_length"),
+                                      f"{where} payload_length", 0, MAX_PAYLOAD_LEN)
+        strict_length = raw_event.get("strict_payload_length", default_strict_length)
+        if type(strict_length) is not bool:
+            raise SchemaError(f"{where} strict_payload_length must be a boolean")
+
+        event_byte_order = raw_event.get("byte_order", default_byte_order)
+        if not isinstance(event_byte_order, str) or event_byte_order not in ENDIANS:
+            raise SchemaError(f"{where} byte_order must be 'little' or 'big'")
+        raw_fields = raw_event.get("fields")
+        if not isinstance(raw_fields, list):
+            raise SchemaError(f"{where}: fields must be a list (it may be empty)")
+
+        fields: list[dict[str, Any]] = []
+        for index, raw_field in enumerate(raw_fields):
+            field_where = f"{where} field #{index}"
+            if not isinstance(raw_field, dict):
+                raise SchemaError(f"{field_where}: each field must be a mapping")
+            _only_keys(raw_field, _PAYLOAD_FIELD_KEYS, field_where)
+            if "description" in raw_field and not isinstance(raw_field["description"], str):
+                raise SchemaError(f"{field_where} description must be a string")
+            field_name = _require_ident(raw_field.get("name"), f"{field_where} name")
+            raw_type = raw_field.get("type")
+            if not isinstance(raw_type, str):
+                raise SchemaError(f"{field_where} type must be a supported type name")
+            type_name = TYPE_ALIASES.get(raw_type, raw_type)
+            if type_name not in PRIMITIVES:
+                raise SchemaError(f"{field_where}: unknown type {raw_type!r}; supported: "
+                                  f"{sorted(set(PRIMITIVES) | set(TYPE_ALIASES))}")
+            type_size = PRIMITIVES[type_name][0]
+            size = _require_int(raw_field.get("size", type_size), f"{field_where} size",
+                                1, MAX_PAYLOAD_LEN)
+            if size != type_size:
+                raise SchemaError(f"{field_where}: size {size} does not match type {raw_type} "
+                                  f"({type_size} bytes)")
+            raw_offset = _require_int(raw_field.get("offset"), f"{field_where} offset",
+                                      offset_base, MAX_PAYLOAD_LEN - size + offset_base)
+            offset = raw_offset - offset_base
+
+            if "endian" in raw_field and "byte_order" in raw_field:
+                if raw_field["endian"] != raw_field["byte_order"]:
+                    raise SchemaError(f"{field_where}: endian and byte_order conflict")
+            endian = raw_field.get("endian", raw_field.get("byte_order", event_byte_order))
+            if not isinstance(endian, str) or endian not in ENDIANS:
+                raise SchemaError(f"{field_where}: endian/byte_order must be 'little' or 'big'")
+
+            field_def: dict[str, Any] = {
+                "name": field_name,
+                "offset": offset,
+                "type": type_name,
+                "size": size,
+                "endian": endian,
+            }
+            if "enum_field" in raw_field:
+                field_def["enum_field"] = raw_field["enum_field"]
+            raw_enum = raw_field.get("enum")
+            if isinstance(raw_enum, dict):
+                enum_name = f"event_{event_type}_{field_name}"
+                if enum_name in enum_maps:
+                    raise SchemaError(f"{field_where}: duplicate inline enum name {enum_name!r}")
+                enum_maps[enum_name] = _parse_payload_enum(raw_enum, field_where)
+                field_def["enum"] = enum_name
+            elif raw_enum is not None:
+                enum_name = _require_ident(raw_enum, f"{field_where} enum")
+                if enum_name not in enum_maps:
+                    raise SchemaError(f"{field_where}: enum {enum_name!r} is not defined")
+                field_def["enum"] = enum_name
+            fields.append(field_def)
+
+        normalized_events.append(
+            _parse_event(
+                event_type,
+                {
+                    "name": name,
+                    "version": schema_version,
+                    "fields": fields,
+                    "payload_length": payload_length,
+                    "strict_payload_length": strict_length,
+                },
+                enum_maps,
+            )
+        )
+
+    return SchemaRegistry(normalized_events, deployment)
+
+
+def _parse_payload_enums(raw: object) -> dict[str, Mapping[int, str]]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise SchemaError("enums must be a mapping of enum name -> {code: LABEL}")
+    enums: dict[str, Mapping[int, str]] = {}
+    for enum_name, values in raw.items():
+        _require_ident(enum_name, "enum name")
+        enums[enum_name] = _parse_payload_enum(values, f"enum {enum_name!r}")
+    return enums
+
+
+def _parse_payload_enum(raw: object, where: str) -> Mapping[int, str]:
+    if not isinstance(raw, dict) or not raw:
+        raise SchemaError(f"{where}: enum must be a non-empty mapping of code -> label")
+    values: dict[int, str] = {}
+    for code, label in raw.items():
+        if not _is_int(code):
+            raise SchemaError(f"{where}: enum code {code!r} must be an integer")
+        if not isinstance(label, str) or not label:
+            raise SchemaError(f"{where}: enum label for {code} must be a non-empty string "
+                              f"(quote YAML words like ON/NO)")
+        values[code] = label
+    return MappingProxyType(values)

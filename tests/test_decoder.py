@@ -8,7 +8,7 @@ import pytest
 
 from fss_py.decoder import decode
 from fss_py.model import DecodeStatus, EventRecord
-from fss_py.schema import load_schema_file, parse_schema
+from fss_py.schema import DEFAULT_SCHEMA_PATH, load_schema_file, parse_schema
 from conftest import SCHEMA
 
 TS = 1_791_454_023_050_000_000
@@ -161,6 +161,40 @@ def test_zero_field_schema():
 def test_schema_version_comes_from_schema():
     reg = registry_for(f("v", 0, "u8", 1, None))
     assert decode(rec(b"\x01"), reg).schema_version == 3
+
+
+def test_deployment_schema_decodes_synthetic_formation_and_navigation_payloads():
+    registry = load_schema_file(DEFAULT_SCHEMA_PATH)
+    formation = decode(rec(struct.pack("<BBH", 1, 7, 42), event_type=1), registry)
+    assert formation.decode_status is DecodeStatus.SUCCESS
+    assert formation.fields == {
+        "formation_state": 1,
+        "formation_state_name": "IN_FORMATION",
+        "formation_id": 7,
+        "leader_id": 42,
+    }
+
+    navigation = decode(
+        rec(struct.pack("<BBHff", 2, 1, 0, 8.5, 15.0), event_type=2),
+        registry,
+    )
+    assert navigation.decode_status is DecodeStatus.SUCCESS
+    assert navigation.fields == {
+        "navigation_state": 2,
+        "navigation_state_name": "EMERGENCY_MANEUVER",
+        "avoidance_active": True,
+        "reserved": 0,
+        "minimum_separation_m": 8.5,
+        "heading_change_deg": 15.0,
+    }
+
+
+def test_deployment_schema_rejects_runtime_payload_length_mismatch():
+    registry = load_schema_file(DEFAULT_SCHEMA_PATH)
+    decoded = decode(rec(b"\x01\x07\x2a", event_type=1), registry)
+    assert decoded.decode_status is DecodeStatus.MALFORMED_PAYLOAD
+    assert decoded.fields == {}
+    assert decoded.reason == "payload has 3 bytes; schema requires exactly 4"
 
 
 def test_decoding_is_deterministic_across_registry_loads(registry):

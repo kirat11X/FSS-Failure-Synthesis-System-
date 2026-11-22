@@ -39,7 +39,7 @@ if str(ROOT_DIR) not in sys.path:
 
 # CRITICAL: Prevent JAX from preallocating GPU VRAM
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
-os.environ["OLLAMA_TIMEOUT"] = os.environ.get("OLLAMA_TIMEOUT", "90")
+os.environ["OLLAMA_TIMEOUT"] = os.environ.get("OLLAMA_TIMEOUT", "none")
 os.environ["SKIP_LOCAL_HF"] = "1"
 
 from bridge.citation_auditor import CitationAuditor

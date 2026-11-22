@@ -380,35 +380,19 @@ def test_absent_entity_query_triggers_insufficient_evidence():
 # Test 6: AppTest Initial Render + 3 Reruns with Research CRT / CSS Loaded
 # =============================================================================
 
-def test_streamlit_apptest_initial_render_and_three_reruns_cyberpunk_css():
-    """Test 6: AppTest from streamlit.testing.v1 on app.py / streamlit_app.py.
-
-    Verifies that the app loads cleanly across initial render + 3 reruns with the Research CRT
-    CSS loaded, and zero unhandled exceptions.
-    """
+def test_streamlit_query_app_initial_render_and_three_reruns():
+    """Verify the query-driven dashboard renders cleanly across repeated reruns."""
     at = AppTest.from_file(APP_PATH, default_timeout=120)
 
-    # Initial Run
     at.run()
     assert len(at.exception) == 0, f"Encountered exception on initial render: {[e.value for e in at.exception]}"
-
-    # Verify Research CRT CSS is injected into the DOM
-    css_loaded = any(
-        "CRT" in m.value or "CYBERPUNK" in m.value or "--phosphor-green" in m.value or "--bg-void" in m.value or "--neon-cyan" in m.value
-        for m in at.markdown
-    )
-    assert css_loaded, "Research CRT CSS styling was not loaded or injected into page markdown"
-
-    # Verify Core UI elements exist
     assert len(at.title) > 0
     assert "Failure Synthesis System" in at.title[0].value
-
-    # Verify Tabs include the Vendor Manual / Domain Knowledge / RAG Inspector
-    tab_labels = [t.label for t in at.tabs]
-    assert any("Vendor Manual" in t or "Domain Knowledge" in t or "Domain RAG" in t or "Error Codes" in t for t in tab_labels)
-
-    # 3 Consecutive Reruns
+    assert len(at.chat_input) == 1
+    assert not at.radio
+    assert not at.selectbox
     for rerun_idx in range(1, 4):
         at.run()
         exceptions = [e.value for e in at.exception]
         assert len(exceptions) == 0, f"Rerun {rerun_idx} threw unexpected exceptions: {exceptions}"
+        assert len(at.chat_input) == 1

@@ -390,11 +390,21 @@ class HybridRetriever:
     """
 
     _instance: HybridRetriever | None = None
+    _knowledge_base_fingerprint: tuple[tuple[str, int, int], ...] | None = None
 
     @classmethod
     def get_instance(cls) -> HybridRetriever:
-        if cls._instance is None:
-            cls._instance = cls()
+        from bridge.knowledge_base import knowledge_base_fingerprint, load_knowledge_base
+
+        fingerprint = knowledge_base_fingerprint()
+        if cls._instance is None or cls._knowledge_base_fingerprint != fingerprint:
+            corpus = [dict(doc) for doc in DOMAIN_KNOWLEDGE]
+            corpus.extend(load_knowledge_base())
+            cls._instance = cls(
+                corpus=corpus,
+                vendor_entries=load_builtin_manual("auto"),
+            )
+            cls._knowledge_base_fingerprint = fingerprint
         return cls._instance
 
     def __init__(

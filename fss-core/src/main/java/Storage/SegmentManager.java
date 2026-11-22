@@ -62,8 +62,8 @@ public final class SegmentManager {
         }
 
         long segmentStart = Math.multiplyExact(
-                Math.floorDiv(timestamp, config.segmentDurationMillis),
-                config.segmentDurationMillis);
+                Math.floorDiv(timestamp, config.segmentDurationMillis * 1_000_000),
+                config.segmentDurationMillis * 1_000_000);// timestamp is in nanoseconds
 
         AgentSegment key = new AgentSegment(segmentStart, agentId);
         BlockMetadata block = currentBlocks.get(key);

@@ -17,7 +17,7 @@ from .decoder import decode_all
 from .evidence import build_evidence
 from .model import ALL, RetrievalRequestError
 from .retriever import MockRetriever
-from .schema import load_schema_file
+from .schema import DEFAULT_SCHEMA_PATH, load_schema_file
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
@@ -34,7 +34,7 @@ def parse_time_ns(text: str) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="python -m fss_py", description=__doc__.splitlines()[0])
-    p.add_argument("--schema", default="schemas/drone_v0.yaml")
+    p.add_argument("--schema", default=str(DEFAULT_SCHEMA_PATH))
     p.add_argument("--fixture", action="append", required=True,
                    help="envelope-stream file (repeatable)")
     p.add_argument("--source", default="ALL", help="source_id or ALL (default)")

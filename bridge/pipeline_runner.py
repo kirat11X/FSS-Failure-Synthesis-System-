@@ -24,7 +24,7 @@ if str(ROOT_DIR) not in sys.path:
 from fss_py.decoder import decode_all
 from fss_py.evidence import build_evidence
 from fss_py.model import ALL, RetrievalRequest, RetrievalResult
-from fss_py.schema import load_schema_file
+from fss_py.schema import DEFAULT_SCHEMA_PATH, load_schema_file
 from fss_py.wire import iter_envelopes
 
 from bridge.clock_skew_compensator import analyze_clock_skew
@@ -287,7 +287,7 @@ def render_report(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="FSS Pipeline Runner (Python side)")
     parser.add_argument("--query", default="Why did drone 474 leave formation?", help="Operator query")
-    parser.add_argument("--schema", default="schemas/drone_v0.yaml", help="Path to schema YAML")
+    parser.add_argument("--schema", default=str(DEFAULT_SCHEMA_PATH), help="Path to schema YAML")
     parser.add_argument("--file", help="Path to envelope .bin file (defaults to reading sys.stdin)")
     parser.add_argument("--start", type=int, default=0, help="Retrieval t_start_ns")
     parser.add_argument("--end", type=int, default=1, help="Retrieval t_end_ns")
@@ -344,6 +344,11 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
 
+    schema_path = Path(args.schema)
+    if not schema_path.is_absolute():
+        schema_path = ROOT_DIR / schema_path
+    registry = load_schema_file(schema_path)
+
     # Load vendor manual matches or error catalog if provided
     vendor_matches: list[dict[str, Any]] = []
     for source_arg in (args.vendor_manual, args.error_catalog):
@@ -392,11 +397,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         events = []
 
-    # 3. Load schema & decode payloads (schema resolved relative to project root)
-    schema_path = Path(args.schema)
-    if not schema_path.is_absolute():
-        schema_path = ROOT_DIR / schema_path
-    registry = load_schema_file(str(schema_path))
+    # 3. Decode payloads with the schema validated at process startup
     decoded = decode_all(events, registry)
 
     # 4. Reconstruct RetrievalResult for evidence context

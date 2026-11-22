@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
@@ -75,7 +75,7 @@ class DecodedEvent:
     timestamp_ns: int
     event_type: int
     event_name: str | None
-    schema_version: int | None
+    schema_version: int | str | None
     decode_status: DecodeStatus
     fields: dict[str, Any]
     interpreted_fields: list[str]  # keys in `fields` that come from enum documentation
@@ -83,6 +83,7 @@ class DecodedEvent:
     reason: str | None  # set for MALFORMED_PAYLOAD
     warnings: list[str]
     payload_len: int
+    unmapped_enum_fields: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {

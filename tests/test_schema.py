@@ -2,7 +2,13 @@
 
 import pytest
 
-from fss_py.schema import SchemaError, load_schema_text, parse_schema
+from fss_py.schema import (
+    DEFAULT_SCHEMA_PATH,
+    SchemaError,
+    load_schema_file,
+    load_schema_text,
+    parse_schema,
+)
 
 
 def field(name="a", offset=0, type="u16", size=2, endian="little", **extra):
@@ -17,6 +23,25 @@ def doc(*fields, enums=None):
             "event_types": {0x01: {"name": "T", "version": 1, "fields": list(fields)}}}
 
 
+def payload_doc(*fields, payload_length=2, defaults=None):
+    return {
+        "schema_version": "1.0",
+        "deployment": "test",
+        "defaults": defaults if defaults is not None else {
+            "byte_order": "little",
+            "offset_base": 0,
+            "strict_payload_length": True,
+        },
+        "events": {
+            1: {
+                "name": "TEST_EVENT",
+                "payload_length": payload_length,
+                "fields": list(fields),
+            },
+        },
+    }
+
+
 def rejects(document, match):
     with pytest.raises(SchemaError, match=match):
         parse_schema(document)
@@ -29,6 +54,17 @@ def test_repo_schema_loads(registry):
     lidar = registry.get(0x10)
     assert [f.name for f in lidar.fields] == ["status_code", "timeout_count"]
     assert lidar.fields[0].enum_field == "status_name"
+
+
+def test_deployment_payload_schema_loads_without_event_specific_code():
+    registry = load_schema_file(DEFAULT_SCHEMA_PATH)
+    assert registry.schema_set == "drone_swarm_v1"
+    assert [schema.event_type for schema in registry.event_schemas] == [1, 2]
+    assert registry.get(1).payload_length == 4
+    assert registry.get(2).payload_length == 12
+    assert registry.get(1).strict_payload_length is True
+    assert registry.get(1).fields[0].type == "u8"
+    assert registry.get(2).fields[3].type == "f32"
 
 
 def test_fields_are_sorted_by_offset():
@@ -155,6 +191,71 @@ event_types:
 """
     with pytest.raises(SchemaError, match="duplicate key 16"):
         load_schema_text(text)
+
+
+def test_duplicate_deployment_event_ids_rejected():
+    text = """
+schema_version: "1.0"
+deployment: test
+events:
+  1: {name: FIRST, payload_length: 0, fields: []}
+  0x1: {name: SECOND, payload_length: 0, fields: []}
+"""
+    with pytest.raises(SchemaError, match="duplicate key 1"):
+        load_schema_text(text)
+
+
+def test_deployment_schema_rejects_overlapping_fields():
+    rejects(
+        payload_doc(
+            {"name": "wide", "type": "uint16", "offset": 0},
+            {"name": "overlap", "type": "uint8", "offset": 1},
+        ),
+        "overlap",
+    )
+
+
+def test_deployment_schema_rejects_invalid_offset():
+    rejects(
+        payload_doc({"name": "value", "type": "uint8", "offset": -1}),
+        "offset must be an integer",
+    )
+
+
+def test_deployment_schema_rejects_unsupported_type():
+    rejects(
+        payload_doc({"name": "value", "type": "uint24", "offset": 0}),
+        "unknown type 'uint24'",
+    )
+
+
+def test_deployment_schema_rejects_field_beyond_declared_payload_length():
+    rejects(
+        payload_doc(
+            {"name": "value", "type": "uint16", "offset": 2},
+            payload_length=3,
+        ),
+        "beyond payload_length",
+    )
+
+
+def test_deployment_schema_applies_offset_base_and_byte_order_defaults():
+    registry = parse_schema(
+        {
+            "schema_version": "1.0",
+            "deployment": "test",
+            "defaults": {"offset_base": 1, "byte_order": "big"},
+            "events": {
+                7: {
+                    "name": "TEST_EVENT",
+                    "payload_length": 2,
+                    "fields": [{"name": "value", "type": "uint16", "offset": 1}],
+                },
+            },
+        }
+    )
+    field = registry.get(7).fields[0]
+    assert (field.offset, field.type, field.endian) == (0, "u16", "big")
 
 
 def test_duplicate_enum_code_rejected():

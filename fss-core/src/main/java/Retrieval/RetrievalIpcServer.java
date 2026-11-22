@@ -15,21 +15,17 @@ public final class RetrievalIpcServer {
 
     private final RetrievalService retrievalService;
     private final ObjectMapper mapper;
-    private final DataInputStream input;
-    private final DataOutputStream output;
 
     public RetrievalIpcServer(RetrievalService retrievalService) {
-        this(retrievalService, System.in, System.out);
-    }
-
-    public RetrievalIpcServer(RetrievalService retrievalService, java.io.InputStream in, java.io.OutputStream out) {
         this.retrievalService = retrievalService;
         this.mapper = new ObjectMapper();
-        this.input = (in instanceof DataInputStream dis) ? dis : new DataInputStream(in);
-        this.output = (out instanceof DataOutputStream dos) ? dos : new DataOutputStream(out);
     }
 
     public void run() throws IOException {
+
+        DataInputStream input = new DataInputStream(System.in);
+
+        DataOutputStream output = new DataOutputStream(System.out);
 
         while (true) {
 
@@ -55,31 +51,17 @@ public final class RetrievalIpcServer {
             try {
                 JsonNode requestJson = mapper.readTree(requestBytes);
 
-                String action = "";
-                if (requestJson.has("action")) {
-                    action = requestJson.get("action").asText();
-                } else if (requestJson.has("command")) {
-                    action = requestJson.get("command").asText();
-                } else if (requestJson.has("bounds")) {
-                    action = "bounds";
-                }
+                RetrievalRequest request = RetrievalRequest.fromJson(requestJson);
 
-                if ("bounds".equalsIgnoreCase(action) || "store_bounds".equalsIgnoreCase(action)) {
-                    StoreBounds bounds = retrievalService.discoverBounds();
-                    responseBytes = mapper.writeValueAsBytes(bounds);
-                } else {
-                    RetrievalRequest request = RetrievalRequest.fromJson(requestJson);
+                RetrievalResponse response = RetrievalResponse.success(
+                        retrievalService.retrieve(
+                                request.allSources(),
+                                request.agentId(),
+                                request.startTime(),
+                                request.endTime(),
+                                request.eventType()));
 
-                    RetrievalResponse response = RetrievalResponse.success(
-                            retrievalService.retrieve(
-                                    request.allSources(),
-                                    request.agentId(),
-                                    request.startTime(),
-                                    request.endTime(),
-                                    request.eventType()));
-
-                    responseBytes = mapper.writeValueAsBytes(response);
-                }
+                responseBytes = mapper.writeValueAsBytes(response);
 
             } catch (Exception e) {
 
