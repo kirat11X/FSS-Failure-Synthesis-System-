@@ -34,7 +34,7 @@ from bridge.schemas import (
     RetrievalEnvelope,
     TelemetryEventWire,
     bind_trace_id,
-    format_iso8601_ns,
+    format_local_timestamp_ns,
     get_or_create_trace_id,
 )
 from fss_py.model import ALL, EventRecord, RetrievalRequest
@@ -80,8 +80,8 @@ class TestBridgeHardening(unittest.TestCase):
         ts_b = 1795139460123456889  # +100 ns
         self.assertNotEqual(ts_a, ts_b)
 
-        iso_a = format_iso8601_ns(ts_a)
-        iso_b = format_iso8601_ns(ts_b)
+        iso_a = format_local_timestamp_ns(ts_a)
+        iso_b = format_local_timestamp_ns(ts_b)
         self.assertEqual(iso_a, "2026-11-20T01:51:00.123456789Z")
         self.assertEqual(iso_b, "2026-11-20T01:51:00.123456889Z")
         self.assertNotEqual(iso_a, iso_b)

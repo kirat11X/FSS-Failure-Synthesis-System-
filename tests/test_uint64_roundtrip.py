@@ -23,7 +23,7 @@ from bridge.java_retriever import JavaRetriever
 from bridge.schemas import (
     RETRIEVAL_ENVELOPE_ADAPTER,
     TelemetryEventWire,
-    format_iso8601_ns,
+    format_local_timestamp_ns,
 )
 from fss_py.model import ALL, EventRecord
 from fss_py.wire import decode_envelope, encode_envelope
@@ -169,8 +169,8 @@ class TestUint64Roundtrip(unittest.TestCase):
         self.assertTrue(str1.endswith("789"))
         self.assertTrue(str2.endswith("889"))
 
-        iso1 = format_iso8601_ns(ts1)
-        iso2 = format_iso8601_ns(ts2)
+        iso1 = format_local_timestamp_ns(ts1)
+        iso2 = format_local_timestamp_ns(ts2)
         self.assertNotEqual(iso1, iso2)
         self.assertTrue(iso1.endswith(".123456789Z"))
         self.assertTrue(iso2.endswith(".123456889Z"))

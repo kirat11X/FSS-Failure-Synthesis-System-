@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from bridge.citation_auditor import CitationAuditor
-from bridge.schemas import format_iso8601_ns
+from bridge.schemas import format_local_timestamp_ns
 from bridge.retrieval_ipc import (
     MAX_RECORDS,
     JavaRetrievalRequest,
@@ -452,6 +452,13 @@ def run_investigation(
         requests_seen.add(request_key)
 
         retrieval = retriever.retrieve(current_request)
+        print(
+            len(retrieval.events),
+retrieval.total_matches,
+retrieval.truncated,
+[(r.source_id, r.timestamp_ns) for r in retrieval.events[:5]]
+
+        )
         _add_retrieval_history(retrieval_history, retrieval)
         for record in retrieval.events:
             records_by_id.setdefault(event_id(record), record)
@@ -1145,7 +1152,7 @@ def _event_reference_key(event: dict[str, Any]) -> tuple[int, str, str]:
         event_type = f"0x{event_type:02X}"
     if not isinstance(event_type, str) or not event_type:
         raise InvestigationError("Evidence contains an invalid event type")
-    return source_id, format_iso8601_ns(timestamp_ns), event_type
+    return source_id, format_local_timestamp_ns(timestamp_ns), event_type
 
 
 def _parse_event_reference(reference: dict[str, Any]) -> tuple[int, str, str]:
@@ -1188,9 +1195,9 @@ def _retrieval_history_for_model(
         if "source" in item:
             visible["source"] = item["source"]
         if "start_time_ns" in item:
-            visible["start_local"] = format_iso8601_ns(item["start_time_ns"])
+            visible["start_local"] = format_local_timestamp_ns(item["start_time_ns"])
         if "end_time_ns" in item:
-            visible["end_local"] = format_iso8601_ns(item["end_time_ns"])
+            visible["end_local"] = format_local_timestamp_ns(item["end_time_ns"])
         if "event_type" in item:
             visible["event_type"] = item["event_type"]
         visible_history.append(visible)
@@ -1325,7 +1332,7 @@ def _analysis_for_review(analysis: dict[str, Any]) -> dict[str, Any]:
             continue
         timestamp_ns = event.pop("timestamp", event.pop("timestamp_ns", None))
         if type(timestamp_ns) is int:
-            event["timestamp_iso8601"] = format_iso8601_ns(timestamp_ns)
+            event["timestamp_iso8601"] = format_local_timestamp_ns(timestamp_ns)
         event.pop("event_id", None)
     return review_analysis
 

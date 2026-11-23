@@ -34,7 +34,7 @@ os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
 from bridge.bin_ingestor import is_critical_event
 from bridge.hybrid_rag import retrieve_hybrid_knowledge
-from bridge.schemas import format_iso8601_ns
+from bridge.schemas import format_local_timestamp_ns
 from bridge.citation_auditor import (
     CitationAuditor,
     ValidationBadge,
@@ -139,18 +139,24 @@ RESERVED_OUTPUT_TOKENS_NON_THINKING = 1200
 # System prompt is byte-identical across queries for host-memory prefix caching
 # (llama-server --cram 256 --system-prompt-file ... --cache-prompt --cache-type-k q8_0)
 SYSTEM_PROMPT = """You are a telemetry investigation assistant.
-You receive an operator query, compact one-line telemetry records, and retrieved knowledge-base
-documents. Each telemetry timestamp is already formatted as local ISO-8601; use it as supplied and
-never convert it or produce raw epoch values.
+
+You receive an operator query, compact one-line telemetry records, and retrieved knowledge-base documents.
+
+TIMEZONE CONTRACT:
+- All timestamps in the operator query and telemetry context are expressed in Indian Standard Time (IST).
+- Telemetry timestamps are already converted to IST before being provided to you.
+- Treat the displayed timestamps as the final local time values.
+- Never convert timestamps, apply timezone offsets, perform timezone arithmetic, or reinterpret them as UTC.
+- Compare timestamps directly as displayed.
+- Never output raw epoch timestamps.
 
 STRICT CONTRACT RULES:
 1. Grounding: Use retrieved telemetry for situation-specific claims and only the retrieved knowledge_base documents for domain explanations. Do not rely on outside knowledge.
-2. Citation: Identify telemetry records in contributing_events using source_id, timestamp_iso8601, and the displayed event_type. Cite retrieved knowledge document IDs [doc-...].
+2. Citation: Identify telemetry records in contributing_events using source_id, timestamp_local, and the displayed event_type. Cite retrieved knowledge document IDs [doc-...].
 3. Accuracy: Only cite records and document IDs present in the context. Never invent identifiers, events, or field meanings.
 4. Clock Caveat: Producer clocks may differ. Do not state cross-source order or causality as fact unless evidence establishes it.
 5. Data Gaps: Report undecoded or opaque data as unknown. Never guess payload bytes.
-6. Each contributing_events item must contain only source_id, timestamp_iso8601, and event_type. Do not output event IDs or raw epoch values.
-7. Format: Output valid JSON adhering to the FailureSynthesis schema:
+6. Format: Output valid JSON adhering to the FailureSynthesis schema:
 {
   "summary": "1-3 sentences answering the operator question with supported citations",
   "likely_cause": "Evidence-supported explanation or null when unsupported",
@@ -160,7 +166,6 @@ STRICT CONTRACT RULES:
   "data_gaps": [],
   "reasoning_truncated": false
 }"""
-
 
 # ---------------------------------------------------------------------------
 # Pydantic v2 Schema & Compatibility Interface
@@ -232,20 +237,16 @@ class FailureSynthesis:
         if isinstance(events_raw, list):
             for e in events_raw:
                 if isinstance(e, dict):
-                    source_id = e.get("source_id")
-                    timestamp_iso8601 = e.get("timestamp_iso8601")
-                    event_type = e.get("event_type")
-                    if type(source_id) is not int:
-                        raise ValueError("Contributing event source_id must be an integer")
-                    if not isinstance(timestamp_iso8601, str) or not timestamp_iso8601:
-                        raise ValueError("Contributing event timestamp_iso8601 is required")
-                    if not isinstance(event_type, str) or not event_type:
-                        raise ValueError("Contributing event event_type is required")
                     events.append(
                         ContributingEvent(
-                            source_id=source_id,
-                            timestamp_iso8601=timestamp_iso8601,
-                            event_type=event_type,
+                            source_id=int(e.get("source_id", 0)),
+                            timestamp_iso8601=str(
+                                e.get("timestamp_iso8601")
+                                or format_local_timestamp_ns(
+                                    int(e.get("timestamp") or e.get("timestamp_ns") or 0)
+                                )
+                            ),
+                            event_type=str(e.get("event_type") or e.get("event_name") or ""),
                         )
                     )
 
@@ -310,7 +311,7 @@ def _telemetry_reference_key(event: dict[str, Any]) -> tuple[int, str, str]:
     source_id = event.get("source_id")
     if type(source_id) is not int:
         raise ValueError("Telemetry record has an invalid source_id")
-    return source_id, format_iso8601_ns(timestamp_ns), _event_type_label(event)
+    return source_id, format_local_timestamp_ns(timestamp_ns), _event_type_label(event)
 
 
 def _resolve_contributing_event_refs(
@@ -513,17 +514,19 @@ def preflight_budget_guard(
     enable_thinking: bool = False,
     include_event_ids: bool = True,
 ) -> tuple[dict[str, Any], bool, str]:
-    """Pre-flight Python token-budget guard.
+    """Check the complete evidence context without dropping retrieved events.
 
-    Computes prompt tokens + reserved output tokens against effective num_ctx.
-    If exceeding budget, performs deterministic compaction (summarizing routine event spans
-    or applying windowing around anomalies) or raises an explicit warning before dispatch.
-    Never silently overflows.
+    Every event supplied by Java retrieval and retained in evidence must
+    remain present. If the complete prompt exceeds the budget, fail
+    explicitly instead of silently compacting the timeline.
     """
-    reserved_output = RESERVED_OUTPUT_TOKENS_THINKING if enable_thinking else RESERVED_OUTPUT_TOKENS_NON_THINKING
+    reserved_output = (
+        RESERVED_OUTPUT_TOKENS_THINKING
+        if enable_thinking
+        else RESERVED_OUTPUT_TOKENS_NON_THINKING
+    )
     available_prompt_budget = max(512, effective_num_ctx - reserved_output)
 
-    # Build initial candidate context
     test_context = build_llm_context(
         evidence,
         query,
@@ -532,128 +535,24 @@ def preflight_budget_guard(
         _skip_budget_guard=True,
         include_event_ids=include_event_ids,
     )
-    est_prompt_tokens = estimate_tokens(SYSTEM_PROMPT) + estimate_tokens(test_context)
 
-    if est_prompt_tokens <= available_prompt_budget:
+    estimated_tokens = (
+        estimate_tokens(SYSTEM_PROMPT) + estimate_tokens(test_context)
+    )
+
+    if estimated_tokens <= available_prompt_budget:
         return evidence, False, ""
 
-    # Exceeding budget -> Execute deterministic compaction
-    all_events = evidence.get("events", [])
-    if not all_events:
-        msg = f"Warning: Prompt ({est_prompt_tokens} tokens) exceeds available budget ({available_prompt_budget} tokens)."
-        warnings.warn(msg, UserWarning, stacklevel=2)
-        return evidence, False, msg
-
-    # Preserve telemetry that the generic event classifier marks as noteworthy.
-    anomalous_indices = set()
-    for idx, ev in enumerate(all_events):
-        if is_critical_event(ev):
-            anomalous_indices.add(idx)
-
-    # Realistic available event token budget computation:
-    # available = num_ctx - system_tokens - rag_tokens - reserved_output - safety_margin
-    system_tokens = estimate_tokens(SYSTEM_PROMPT)
-    knowledge_tokens = estimate_tokens(json.dumps(knowledge, default=str)) if knowledge else 0
-    query_tokens = estimate_tokens(query)
-    safety_margin = 256
-    available_event_budget = max(400, available_prompt_budget - system_tokens - knowledge_tokens - query_tokens - safety_margin)
-
-    # Subword-calibrated event tokens per event
-    sample_size = min(len(all_events), 25)
-    sample_text = "\n".join(str(all_events[i]) for i in range(sample_size))
-    avg_tokens_per_event = max(35, estimate_tokens(sample_text) // max(1, sample_size))
-
-    # Upper bound on total events that can fit inside available event budget
-    max_budget_events = max(10, available_event_budget // avg_tokens_per_event)
-    target_event_count = min(len(all_events), max_budget_events)
-
-    critical_indices = sorted(anomalous_indices)
-    nominal_indices = [i for i in range(len(all_events)) if i not in anomalous_indices]
-
-    if len(all_events) <= target_event_count:
-        final_indices = list(range(len(all_events)))
-    elif len(critical_indices) >= target_event_count:
-        # Downsample critical events evenly if critical alone exceed budget
-        step = (len(critical_indices) - 1) / max(1, (target_event_count - 1))
-        final_indices = sorted({critical_indices[round(i * step)] for i in range(target_event_count)})
-    else:
-        # Keep 100% of critical events, fill remainder with nominal evenly across timeline
-        selected_indices = set(critical_indices)
-        nominal_budget = target_event_count - len(critical_indices)
-        step = (len(nominal_indices) - 1) / max(1, (nominal_budget - 1))
-        for i in range(nominal_budget):
-            idx = round(i * step)
-            if idx < len(nominal_indices):
-                selected_indices.add(nominal_indices[idx])
-        final_indices = sorted(selected_indices)
-
-    compacted_events: list[dict[str, Any]] = [all_events[i] for i in final_indices]
-    critical_event_objs = [all_events[i] for i in critical_indices]
-
-    # Re-evaluate token count after proportional compaction
-    compacted_evidence = dict(evidence)
-    compacted_evidence["events"] = compacted_events
-
-    test_context2 = build_llm_context(
-        compacted_evidence,
-        query,
-        knowledge,
-        effective_num_ctx=effective_num_ctx,
-        _skip_budget_guard=True,
-        include_event_ids=include_event_ids,
+    msg = (
+        f"Complete evidence context requires approximately {estimated_tokens} "
+        f"prompt tokens, exceeding the available budget of "
+        f"{available_prompt_budget} tokens (effective num_ctx={effective_num_ctx}, "
+        f"reserved output={reserved_output}). No retrieved events were removed. "
+        f"Use a larger supported context or complete-evidence chunked analysis."
     )
-    est_prompt_tokens2 = estimate_tokens(SYSTEM_PROMPT) + estimate_tokens(test_context2)
 
-    # Progressively trim nominal events if still slightly over budget
-    while est_prompt_tokens2 > available_prompt_budget and len(compacted_events) > len(critical_indices) + 2:
-        current_nominal = [ev for ev in compacted_events if ev.get("event_id") not in {all_events[i].get("event_id") for i in critical_indices}]
-        if not current_nominal:
-            break
-        to_remove_ids = {ev.get("event_id") for ev in current_nominal[1::2]}
-        if not to_remove_ids and current_nominal:
-            to_remove_ids = {current_nominal[0].get("event_id")}
-        compacted_events = [ev for ev in compacted_events if ev.get("event_id") not in to_remove_ids]
-        compacted_evidence["events"] = compacted_events
-        test_context2 = build_llm_context(
-            compacted_evidence,
-            query,
-            knowledge,
-            effective_num_ctx=effective_num_ctx,
-            _skip_budget_guard=True,
-            include_event_ids=include_event_ids,
-        )
-        est_prompt_tokens2 = estimate_tokens(SYSTEM_PROMPT) + estimate_tokens(test_context2)
-
-    # Final fallback if STILL over budget: clamp strictly to max_budget_events
-    if est_prompt_tokens2 > available_prompt_budget:
-        crit_set = {all_events[i].get("event_id") for i in critical_indices}
-        crits_in_compacted = [ev for ev in compacted_events if ev.get("event_id") in crit_set]
-        nominal_in_compacted = [ev for ev in compacted_events if ev.get("event_id") not in crit_set]
-        compacted_events = crits_in_compacted[:max_budget_events]
-        if len(compacted_events) < max_budget_events and nominal_in_compacted:
-            rem = max_budget_events - len(compacted_events)
-            compacted_events.extend(nominal_in_compacted[:rem])
-        compacted_events = sorted(compacted_events, key=lambda e: e.get("timestamp_ns", 0))
-        compacted_evidence["events"] = compacted_events
-
-    # Add explicit Data Gap record for budget compaction
-    existing_gaps = list(compacted_evidence.get("data_gaps") or [])
-    guard_msg = (
-        f"Pre-flight token budget guard deterministically compacted timeline from {len(all_events)} "
-        f"to {len(compacted_evidence['events'])} events to fit effective num_ctx={effective_num_ctx} "
-        f"(reserved output: {reserved_output} tokens)."
-    )
-    existing_gaps.append({
-        "kind": "BUDGET_GUARD_COMPACTION",
-        "event_id": None,
-        "source_id": None,
-        "detail": guard_msg,
-    })
-    compacted_evidence["data_gaps"] = existing_gaps
-
-    warnings.warn(guard_msg, UserWarning, stacklevel=2)
-    return compacted_evidence, True, guard_msg
-
+    warnings.warn(msg, UserWarning, stacklevel=2)
+    return evidence, False, msg
 
 # ---------------------------------------------------------------------------
 # Hybrid RAG & Prompt Context Assembly
@@ -709,7 +608,7 @@ def build_llm_context(
 
             parts = [
                 f"D{source_id}",
-                format_iso8601_ns(int(timestamp_ns)),
+                format_local_timestamp_ns(int(timestamp_ns)),
                 _event_type_label(ev),
             ]
             parts.extend(
@@ -1028,12 +927,12 @@ def deterministic_synthesize(
     contributing = [
         {
             "source_id": event.get("source_id", 0),
-            "timestamp_iso8601": format_iso8601_ns(
-                event.get("timestamp_ns", event.get("timestamp", 0))
-            ),
-            "event_type": _event_type_label(event),
+            "timestamp": event.get("timestamp_ns", event.get("timestamp", 0)),
+            "event_type": str(event.get("event_type", event.get("event_name", ""))),
+            "event_id": event.get("event_id", ""),
         }
         for event in selected_events
+        if event.get("event_id")
     ]
     clock_caveat = evidence.get("clock_caveat")
     return {
@@ -1077,6 +976,30 @@ def synthesize_and_validate(
     """Run synthesis using retrieved telemetry and knowledge_base documents only."""
     knowledge = retrieve_relevant_knowledge(evidence, query, top_k=8)
     audit_engine = auditor or CitationAuditor()
+    print("\n========== FSS RETRIEVAL DEBUG ==========")
+
+    events = evidence.get("events", [])
+
+    print("[DEBUG] Retrieved evidence events:", len(events))
+
+    from collections import Counter
+
+    print("[DEBUG] Source distribution:",
+        Counter(event.get("source_id") for event in events))
+
+    print("[DEBUG] Event type distribution:",
+        Counter(event.get("event_type") for event in events))
+
+    for event in events:
+        if event.get("source_id") == 2:
+            print(
+                "[DEBUG D2]",
+                event.get("timestamp_ns"),
+                event.get("event_type"),
+                event.get("fields")
+            )
+
+    print("========== END RETRIEVAL DEBUG ==========\n")
 
     if sufficiency_gate_enabled:
         sufficiency = evaluate_sufficiency(evidence, query, knowledge)
@@ -1097,6 +1020,17 @@ def synthesize_and_validate(
         effective_num_ctx=effective_num_ctx,
         enable_thinking=enable_thinking,
     )
+    print("\n[DEBUG] Events before guard:", len(evidence.get("events", [])))
+    print("[DEBUG] Events after guard:", len(guarded_evidence.get("events", [])))
+
+    for event in guarded_evidence.get("events", []):
+        if event.get("source_id") == 2:
+            print(
+                "[GUARDED D2]",
+                event.get("timestamp_ns"),
+                event.get("event_type"),
+                event.get("fields")
+            )
     context_text = build_llm_context(
         guarded_evidence,
         query,
@@ -1105,7 +1039,16 @@ def synthesize_and_validate(
         enable_thinking=enable_thinking,
         _skip_budget_guard=True,
     )
+    # DEBUG: Inspect the exact context sent to the LLM
+    debug_path = "debug_llm_context.txt"
 
+    with open(debug_path, "w", encoding="utf-8") as f:
+        f.write(context_text)
+
+    print(f"\n[DEBUG] LLM context saved to: {debug_path}")
+    print(f"[DEBUG] Context characters: {len(context_text)}")
+    print(f"[DEBUG] Guarded evidence events: {len(guarded_evidence.get('events', []))}")
+    print(f"[DEBUG] D2 references in context: {context_text.count('D2 |')}")
     synthesis: dict[str, Any] | None = None
     model_used = "Offline deterministic reasoning"
 
@@ -1171,7 +1114,6 @@ def synthesize_and_validate(
     # Clean schema validation
     validated_obj = validate_synthesis_schema(synthesis)
     synthesis_dict = validated_obj.model_dump()
-    _resolve_contributing_event_refs(synthesis_dict, guarded_evidence)
 
     # 7. Post-synthesis 4-Tier Citation & Warrant Audit
     report = audit_engine.audit(

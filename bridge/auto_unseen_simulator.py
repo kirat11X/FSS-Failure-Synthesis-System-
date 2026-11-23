@@ -29,7 +29,7 @@ from fss_py.model import ALL, EventRecord
 from fss_py.schema import load_schema_file
 from fss_py.wire import crc32c, encode_envelope
 from bridge.java_retriever import JavaRetriever
-from bridge.schemas import format_iso8601_ns
+from bridge.schemas import format_local_timestamp_ns
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 
@@ -589,7 +589,7 @@ def run_auto_unseen_pipeline(
             "index": idx + 1,
             "source_id": rec.source_id,
             "timestamp_ns": str(rec.timestamp_ns),
-            "iso_timestamp": format_iso8601_ns(rec.timestamp_ns),
+            "iso_timestamp": format_local_timestamp_ns(rec.timestamp_ns),
             "event_type_hex": f"0x{rec.event_type:04X}",
             "payload_len": len(rec.payload_bytes),
             "header_hex": f"{header_hex[:16]}...{header_hex[-8:]}",

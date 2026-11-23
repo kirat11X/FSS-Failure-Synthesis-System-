@@ -62,25 +62,26 @@ def bind_trace_id(trace_id: str | None = None) -> str:
     os.environ["FSS_TRACE_ID"] = tid
     return tid
 
+from zoneinfo import ZoneInfo
 
-def format_iso8601_ns(ts_ns: int) -> str:
-    """Losslessly format an unsigned 64-bit nanosecond timestamp in local time."""
+IST = ZoneInfo("Asia/Kolkata")
+
+
+def format_local_timestamp_ns(ts_ns: int) -> str:
+    """Format an unsigned 64-bit nanosecond timestamp as local IST."""
     sec = ts_ns // 1_000_000_000
     nsec = ts_ns % 1_000_000_000
+
     try:
         dt = datetime.datetime.fromtimestamp(
             sec, tz=datetime.timezone.utc
-        ).astimezone()
+        ).astimezone(IST)
     except (OverflowError, OSError, ValueError) as exc:
-        raise ValueError(f"timestamp {ts_ns} ns cannot be represented as local ISO-8601") from exc
+        raise ValueError(
+            f"timestamp {ts_ns} ns cannot be represented in IST"
+        ) from exc
 
-    offset = dt.strftime("%z")
-    if len(offset) == 5:
-        offset = f"{offset[:3]}:{offset[3:]}"
-    elif not offset:
-        offset = "Z"
-    return dt.strftime("%Y-%m-%dT%H:%M:%S") + f".{nsec:09d}{offset}"
-
+    return dt.strftime("%Y-%m-%d %H:%M:%S") + f".{nsec:09d} IST"
 
 class TelemetryEventWire(BaseModel):
     """Wire representation of an ingested or retrieved telemetry event.
@@ -120,7 +121,7 @@ class TelemetryEventWire(BaseModel):
 
     @property
     def iso8601(self) -> str:
-        return format_iso8601_ns(self.timestamp_ns)
+        return format_local_timestamp_ns(self.timestamp_ns)
 
     @property
     def display_ns(self) -> str:
