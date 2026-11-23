@@ -2,7 +2,7 @@
 
 Provides:
   - Lossless uint64 parsing (to arbitrary-precision Python int) and base-10 string serialization.
-  - Formatted ISO-8601 UTC nanosecond display representations.
+  - Formatted local-time ISO-8601 nanosecond display representations.
   - Strict Pydantic v2 TypeAdapter parsing (TypeAdapter.validate_json).
   - Draft 2020-12 JSON Schema generation.
   - W3C 32-hex trace_id context propagation via structlog.contextvars.
@@ -64,14 +64,22 @@ def bind_trace_id(trace_id: str | None = None) -> str:
 
 
 def format_iso8601_ns(ts_ns: int) -> str:
-    """Losslessly format an unsigned 64-bit nanosecond timestamp into ISO-8601 UTC with nanoseconds."""
+    """Losslessly format an unsigned 64-bit nanosecond timestamp in local time."""
     sec = ts_ns // 1_000_000_000
     nsec = ts_ns % 1_000_000_000
     try:
-        dt = datetime.datetime.fromtimestamp(sec, tz=datetime.timezone.utc)
-        return dt.strftime("%Y-%m-%dT%H:%M:%S") + f".{nsec:09d}Z"
-    except (OverflowError, OSError, ValueError):
-        return f"{ts_ns} ns (synthetic out-of-range epoch)"
+        dt = datetime.datetime.fromtimestamp(
+            sec, tz=datetime.timezone.utc
+        ).astimezone()
+    except (OverflowError, OSError, ValueError) as exc:
+        raise ValueError(f"timestamp {ts_ns} ns cannot be represented as local ISO-8601") from exc
+
+    offset = dt.strftime("%z")
+    if len(offset) == 5:
+        offset = f"{offset[:3]}:{offset[3:]}"
+    elif not offset:
+        offset = "Z"
+    return dt.strftime("%Y-%m-%dT%H:%M:%S") + f".{nsec:09d}{offset}"
 
 
 class TelemetryEventWire(BaseModel):

@@ -34,6 +34,7 @@ os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
 from bridge.bin_ingestor import is_critical_event
 from bridge.hybrid_rag import retrieve_hybrid_knowledge
+from bridge.schemas import format_iso8601_ns
 from bridge.citation_auditor import (
     CitationAuditor,
     ValidationBadge,
@@ -73,7 +74,7 @@ _load_env()
 # Configuration & Backend Enforcements
 # ---------------------------------------------------------------------------
 
-DEFAULT_NUM_CTX = 16384
+DEFAULT_NUM_CTX = 1000000
 
 # Enforce num_ctx >= 16384 for Ollama
 # Spec rule: configure via OLLAMA_CONTEXT_LENGTH=16384 env, or native /api/chat options: {"num_ctx": 16384}
@@ -138,15 +139,18 @@ RESERVED_OUTPUT_TOKENS_NON_THINKING = 1200
 # System prompt is byte-identical across queries for host-memory prefix caching
 # (llama-server --cram 256 --system-prompt-file ... --cache-prompt --cache-type-k q8_0)
 SYSTEM_PROMPT = """You are a telemetry investigation assistant.
-You receive an evidence JSON (format fss-evidence/v0) and an operator query.
+You receive an operator query, compact one-line telemetry records, and retrieved knowledge-base
+documents. Each telemetry timestamp is already formatted as local ISO-8601; use it as supplied and
+never convert it or produce raw epoch values.
 
 STRICT CONTRACT RULES:
 1. Grounding: Use retrieved telemetry for situation-specific claims and only the retrieved knowledge_base documents for domain explanations. Do not rely on outside knowledge.
-2. Citation: Cite factual claims with event IDs [ev-...] or retrieved knowledge document IDs [doc-...].
-3. Accuracy: Only cite IDs present in the telemetry or retrieved knowledge context. Never invent identifiers, events, or field meanings.
+2. Citation: Identify telemetry records in contributing_events using source_id, timestamp_iso8601, and the displayed event_type. Cite retrieved knowledge document IDs [doc-...].
+3. Accuracy: Only cite records and document IDs present in the context. Never invent identifiers, events, or field meanings.
 4. Clock Caveat: Producer clocks may differ. Do not state cross-source order or causality as fact unless evidence establishes it.
 5. Data Gaps: Report undecoded or opaque data as unknown. Never guess payload bytes.
-6. Format: Output valid JSON adhering to the FailureSynthesis schema:
+6. Each contributing_events item must contain only source_id, timestamp_iso8601, and event_type. Do not output event IDs or raw epoch values.
+7. Format: Output valid JSON adhering to the FailureSynthesis schema:
 {
   "summary": "1-3 sentences answering the operator question with supported citations",
   "likely_cause": "Evidence-supported explanation or null when unsupported",
@@ -165,9 +169,9 @@ STRICT CONTRACT RULES:
 @dataclass
 class ContributingEvent:
     source_id: int
-    timestamp: int
+    timestamp_iso8601: str
     event_type: str
-    event_id: str
+    event_id: str = ""
 
 
 @dataclass
@@ -197,11 +201,10 @@ class FailureSynthesis:
                         "type": "object",
                         "properties": {
                             "source_id": {"type": "integer"},
-                            "timestamp": {"type": "integer"},
+                            "timestamp_iso8601": {"type": "string"},
                             "event_type": {"type": "string"},
-                            "event_id": {"type": "string"},
                         },
-                        "required": ["source_id", "timestamp", "event_type", "event_id"],
+                        "required": ["source_id", "timestamp_iso8601", "event_type"],
                     },
                 },
                 "uncertainty": {"type": "array", "items": {"type": "string"}},
@@ -229,12 +232,20 @@ class FailureSynthesis:
         if isinstance(events_raw, list):
             for e in events_raw:
                 if isinstance(e, dict):
+                    source_id = e.get("source_id")
+                    timestamp_iso8601 = e.get("timestamp_iso8601")
+                    event_type = e.get("event_type")
+                    if type(source_id) is not int:
+                        raise ValueError("Contributing event source_id must be an integer")
+                    if not isinstance(timestamp_iso8601, str) or not timestamp_iso8601:
+                        raise ValueError("Contributing event timestamp_iso8601 is required")
+                    if not isinstance(event_type, str) or not event_type:
+                        raise ValueError("Contributing event event_type is required")
                     events.append(
                         ContributingEvent(
-                            source_id=int(e.get("source_id", 0)),
-                            timestamp=int(e.get("timestamp") or e.get("timestamp_ns") or 0),
-                            event_type=str(e.get("event_type") or e.get("event_name") or ""),
-                            event_id=str(e.get("event_id", "")),
+                            source_id=source_id,
+                            timestamp_iso8601=timestamp_iso8601,
+                            event_type=event_type,
                         )
                     )
 
@@ -261,6 +272,85 @@ def get_synthesis_json_schema() -> dict[str, Any]:
 def validate_synthesis_schema(data: dict[str, Any]) -> FailureSynthesis:
     """Validate raw LLM dictionary against FailureSynthesis schema."""
     return FailureSynthesis.model_validate(data)
+
+
+def _event_type_label(event: dict[str, Any]) -> str:
+    event_name = event.get("event_name")
+    if event_name:
+        return str(event_name)
+    event_type = event.get("event_type")
+    if isinstance(event_type, int):
+        return f"0x{event_type:02X}"
+    if isinstance(event_type, str):
+        try:
+            return f"0x{int(event_type, 0):02X}"
+        except ValueError:
+            return event_type
+    return "UNKNOWN_EVENT_TYPE"
+
+
+def _format_record_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, str):
+        if re.fullmatch(r"[A-Za-z0-9_./:+-]+", value):
+            return value
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return str(value)
+
+
+def _telemetry_reference_key(event: dict[str, Any]) -> tuple[int, str, str]:
+    timestamp_ns = event.get("timestamp_ns")
+    if timestamp_ns is None:
+        timestamp_ns = event.get("timestamp")
+    if type(timestamp_ns) is not int:
+        raise ValueError("Telemetry record has an invalid timestamp")
+    source_id = event.get("source_id")
+    if type(source_id) is not int:
+        raise ValueError("Telemetry record has an invalid source_id")
+    return source_id, format_iso8601_ns(timestamp_ns), _event_type_label(event)
+
+
+def _resolve_contributing_event_refs(
+    synthesis: dict[str, Any],
+    evidence: dict[str, Any],
+) -> None:
+    events_by_reference: dict[tuple[int, str, str], list[dict[str, Any]]] = {}
+    for event in evidence.get("events", []):
+        events_by_reference.setdefault(_telemetry_reference_key(event), []).append(event)
+
+    cited_ids: list[str] = []
+    for reference in synthesis.get("contributing_events", []):
+        if not isinstance(reference, dict):
+            continue
+        key = (
+            reference.get("source_id"),
+            reference.get("timestamp_iso8601"),
+            reference.get("event_type"),
+        )
+        matches = events_by_reference.get(key, [])
+        if len(matches) != 1:
+            continue
+        event = matches[0]
+        reference["event_id"] = event["event_id"]
+        reference["timestamp"] = event["timestamp_ns"]
+        reference["event_type"] = _event_type_label(event)
+        if event["event_id"] not in cited_ids:
+            cited_ids.append(event["event_id"])
+
+    for field_name in ("summary", "likely_cause"):
+        statement = synthesis.get(field_name)
+        if not isinstance(statement, str):
+            continue
+        missing = [
+            f"[{event_id}]"
+            for event_id in cited_ids
+            if f"[{event_id}]" not in statement
+        ]
+        if missing:
+            synthesis[field_name] = f"{statement.rstrip()} {' '.join(missing)}".strip()
 
 
 # ---------------------------------------------------------------------------
@@ -583,10 +673,9 @@ def build_llm_context(
     _skip_budget_guard: bool = False,
     include_event_ids: bool = True,
 ) -> str:
-    """Format query, retrieved telemetry, knowledge-base documents, and data gaps."""
-    guard_warning = ""
+    """Format records as compact local-time lines with separately retrieved KB context."""
     if not _skip_budget_guard:
-        evidence, _, guard_warning = preflight_budget_guard(
+        evidence, _, _ = preflight_budget_guard(
             evidence,
             query,
             knowledge,
@@ -595,111 +684,52 @@ def build_llm_context(
             include_event_ids=include_event_ids,
         )
 
-    retrieval = evidence.get("retrieval") or {}
-    sources = evidence.get("sources", [])
-    clock_caveat = evidence.get("clock_caveat")
     all_events = evidence.get("events", [])
 
     lines = [
-        "=== USER QUERY ===",
+        "Query:",
         query,
         "",
+        "Telemetry records (one source record per line; timestamps are local ISO-8601):",
     ]
 
-    if guard_warning:
-        lines.append(f"⚠️ [PRE-FLIGHT BUDGET GUARD] {guard_warning}")
-        lines.append("")
-
-    event_citation_note = (
-        "cite with [ev-...]"
-        if include_event_ids
-        else "cite with source_id, timestamp_ns, and numeric event_type"
-    )
-    lines.extend([
-        "### RETRIEVED TELEMETRY",
-        f"Retrieval: source={retrieval.get('source', 'ALL')}, inclusive window "
-        f"[{retrieval.get('t_start_ns', 0)}, {retrieval.get('t_end_ns', 0)}] ns, "
-        f"max_records={retrieval.get('max_events', 100)}, "
-        f"returned={retrieval.get('returned', len(all_events))}, "
-        f"truncated={retrieval.get('truncated', False)}",
-        f"Sources: {', '.join(map(str, sources)) if sources else 'none'}",
-        f"Ordering: {evidence.get('ordering', 'Grouped by source_id, sorted by producer timestamp.')}",
-    ])
-
-    if clock_caveat:
-        lines.append(f"Clock caveat: {clock_caveat}")
-
     if all_events:
-        lines.append(
-            "Decoded events (one JSON per line, producer_time_ns on producer's clock, "
-            f"{event_citation_note}):"
-        )
         for ev in all_events:
-            if include_event_ids:
-                entry = {
-                    "event_id": ev["event_id"],
-                    "source_id": ev["source_id"],
-                    "producer_time_ns": ev.get("timestamp_ns") or ev.get("timestamp"),
-                    "event": ev.get("event_name") or ev.get("event_type"),
-                    "status": ev.get("decode_status"),
-                    "fields": ev.get("fields", {}),
-                    "interpreted": ev.get("interpreted_fields", []),
-                }
-            else:
-                raw_event_type = ev.get("event_type")
-                event_type = (
-                    int(raw_event_type, 0)
-                    if isinstance(raw_event_type, str)
-                    else raw_event_type
-                )
-                entry = {
-                    "source_id": ev["source_id"],
-                    "timestamp_ns": (
-                        ev.get("timestamp_ns")
-                        if ev.get("timestamp_ns") is not None
-                        else ev.get("timestamp")
-                    ),
-                    "event_type": event_type,
-                    "event_name": ev.get("event_name"),
-                    "decode_status": ev.get("decode_status"),
-                    "fields": ev.get("fields", {}),
-                    "interpreted_fields": ev.get("interpreted_fields", []),
-                }
-            lines.append(json.dumps(entry))
+            timestamp_ns = ev.get("timestamp_ns")
+            if timestamp_ns is None:
+                timestamp_ns = ev.get("timestamp")
+            if timestamp_ns is None:
+                raise ValueError("Telemetry record is missing its numeric timestamp")
+            source_id = ev.get("source_id")
+            if type(source_id) is not int:
+                raise ValueError("Telemetry record has an invalid source_id")
+            fields = ev.get("fields") or {}
+            if not isinstance(fields, dict):
+                raise ValueError("Telemetry record fields must be an object")
+
+            parts = [
+                f"D{source_id}",
+                format_iso8601_ns(int(timestamp_ns)),
+                _event_type_label(ev),
+            ]
+            parts.extend(
+                f"{name}={_format_record_value(value)}"
+                for name, value in fields.items()
+            )
+            lines.append(" | ".join(parts))
     else:
-        lines.append("No events recorded or retrieved in the requested time window.")
+        lines.append("(No telemetry records retrieved)")
 
     lines.append("")
-    lines.append("### RETRIEVED KNOWLEDGE_BASE DOCUMENTS")
+    lines.append("Retrieved knowledge-base documents:")
     knowledge_chunks = knowledge[:8]
     if knowledge_chunks:
         for doc in knowledge_chunks:
             doc_id = doc.get("id") or doc.get("chunk")
-            lines.append(
-                f'<document id="{doc_id}" chunk="{doc.get("chunk")}" '
-                f'kind="{doc.get("kind")}" domain="{doc.get("domain")}" '
-                f'title="{doc.get("title")}" source_filename="{doc.get("source_filename", "")}" '
-                f'section="{doc.get("section", "")}" page_number="{doc.get("page_number", "")}" '
-                f'schema_version="{doc.get("schema_version", "")}">'
-            )
-            for line in doc.get("content", "").splitlines():
-                lines.append(f"| {line}")
-            lines.append("</document>")
+            lines.append(f"[{doc_id}] {doc.get('title', '')}".rstrip())
+            lines.extend(doc.get("content", "").splitlines())
     else:
-        lines.append("(No knowledge_base documents matched)")
-
-    lines.append("")
-    lines.append("### DATA GAPS AND DECODING WARNINGS")
-    gaps = evidence.get("data_gaps", [])
-    if gaps:
-        for g in gaps:
-            detail = g.get("detail")
-            if not include_event_ids and isinstance(detail, str):
-                detail = re.sub(r"\bevent ev-[0-9a-f]{12}\b", "event", detail)
-                detail = re.sub(r"\bev-[0-9a-f]{12}\b", "", detail)
-            lines.append(f"- [{g.get('kind', 'GAP')}] {detail}")
-    else:
-        lines.append("None reported.")
+        lines.append("(No knowledge-base documents matched)")
 
     return "\n".join(lines)
 
@@ -998,12 +1028,12 @@ def deterministic_synthesize(
     contributing = [
         {
             "source_id": event.get("source_id", 0),
-            "timestamp": event.get("timestamp_ns", event.get("timestamp", 0)),
-            "event_type": str(event.get("event_type", event.get("event_name", ""))),
-            "event_id": event.get("event_id", ""),
+            "timestamp_iso8601": format_iso8601_ns(
+                event.get("timestamp_ns", event.get("timestamp", 0))
+            ),
+            "event_type": _event_type_label(event),
         }
         for event in selected_events
-        if event.get("event_id")
     ]
     clock_caveat = evidence.get("clock_caveat")
     return {
@@ -1141,6 +1171,7 @@ def synthesize_and_validate(
     # Clean schema validation
     validated_obj = validate_synthesis_schema(synthesis)
     synthesis_dict = validated_obj.model_dump()
+    _resolve_contributing_event_refs(synthesis_dict, guarded_evidence)
 
     # 7. Post-synthesis 4-Tier Citation & Warrant Audit
     report = audit_engine.audit(
