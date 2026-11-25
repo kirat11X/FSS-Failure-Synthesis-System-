@@ -34,8 +34,29 @@ public final class StorageConfig {
         }
 
         Path base = propertiesPath.toAbsolutePath().getParent();
-        Path root = resolve(base, required(p, "root"));
+        String rawRoot = required(p, "root").trim();
+        Path root = resolve(base, rawRoot);
+        boolean isDefaultRepoRoot = "./test-data".equals(rawRoot) || "test-data".equals(rawRoot);
+        boolean allowFallback = Boolean.parseBoolean(p.getProperty("fallbackToRepoDefaults", "true"));
+        if (isDefaultRepoRoot && allowFallback && !hasData(root)) {
+            Path alt1 = base.resolve("test_data").resolve("test-data");
+            Path alt2 = base.resolve("test-data");
+            Path alt3 = base.resolve("test_data");
+            if (hasData(alt1)) {
+                root = alt1;
+            } else if (hasData(alt2)) {
+                root = alt2;
+            } else if (hasData(alt3)) {
+                root = alt3;
+            }
+        }
         Path envelopePath = resolve(base, required(p, "envelopeConfig"));
+        if (!Files.exists(envelopePath)) {
+            Path altEnv = base.resolve("fss-core").resolve("envelope.cfg");
+            if (Files.exists(altEnv)) {
+                envelopePath = altEnv;
+            }
+        }
 
         int blockSize = integer(p, "blockSize");
         int bufferCapacity = integer(p, "bufferCapacityBytes");
@@ -68,6 +89,18 @@ public final class StorageConfig {
     private static Path resolve(Path base, String value) {
         Path path = Path.of(value);
         return path.isAbsolute() ? path : base.resolve(path).normalize();
+    }
+
+    private static boolean hasData(Path dir) {
+        if (dir == null || !Files.isDirectory(dir)) {
+            return false;
+        }
+        Path blocks = dir.resolve("blocks.dat");
+        try {
+            return Files.isRegularFile(blocks) && Files.size(blocks) > 0;
+        } catch (IOException e) {
+            return false;
+        }
     }
 
     private static String required(Properties p, String key) throws IOException {

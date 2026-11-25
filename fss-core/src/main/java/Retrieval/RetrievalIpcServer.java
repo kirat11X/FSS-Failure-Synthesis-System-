@@ -5,6 +5,7 @@ import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.EOFException;
 import java.io.IOException;
+import java.util.List;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -53,13 +54,28 @@ public final class RetrievalIpcServer {
 
                 RetrievalRequest request = RetrievalRequest.fromJson(requestJson);
 
+                List<RetrievalRecord> allRecords = retrievalService.retrieve(
+                        request.allSources(),
+                        request.agentId(),
+                        request.startTime(),
+                        request.endTime(),
+                        request.eventType());
+
+                int totalMatches = allRecords.size();
+                int maxRecords = request.maxRecords();
+                boolean truncated = totalMatches > maxRecords;
+
+                List<RetrievalRecord> returnedRecords;
+                if (truncated) {
+                    returnedRecords = allRecords.subList(totalMatches - maxRecords, totalMatches);
+                } else {
+                    returnedRecords = allRecords;
+                }
+
                 RetrievalResponse response = RetrievalResponse.success(
-                        retrievalService.retrieve(
-                                request.allSources(),
-                                request.agentId(),
-                                request.startTime(),
-                                request.endTime(),
-                                request.eventType()));
+                        returnedRecords,
+                        totalMatches,
+                        truncated);
 
                 responseBytes = mapper.writeValueAsBytes(response);
 

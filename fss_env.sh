@@ -9,11 +9,31 @@ export PYTHONPATH="${FSS_ROOT}:${PYTHONPATH:-}"
 # Python virtual environment (if present)
 if [ -d "${FSS_ROOT}/.venv" ]; then
     export VIRTUAL_ENV="${FSS_ROOT}/.venv"
-    export PATH="${VIRTUAL_ENV}/bin:${PATH}"
+    if [ -d "${VIRTUAL_ENV}/bin" ]; then
+        export PATH="${VIRTUAL_ENV}/bin:${PATH}"
+    elif [ -d "${VIRTUAL_ENV}/Scripts" ]; then
+        export PATH="${VIRTUAL_ENV}/Scripts:${PATH}"
+    fi
+fi
+
+# Local toolchain on PATH
+if [ -d "$HOME/.local/bin" ] && [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
+    export PATH="$HOME/.local/bin:$PATH"
 fi
 
 # Java Classpath & Runtime
-export JAVA_HOME="${JAVA_HOME:-/usr/lib/jvm/java-25-openjdk}"
+if [ -z "${JAVA_HOME:-}" ] || [ ! -d "${JAVA_HOME:-}" ]; then
+    if [ -d "$HOME/.local/temurin-21" ]; then
+        export JAVA_HOME="$HOME/.local/temurin-21"
+    elif [ -d "/usr/lib/jvm/java-21-openjdk" ] && [ -x "/usr/lib/jvm/java-21-openjdk/bin/javac" ]; then
+        export JAVA_HOME="/usr/lib/jvm/java-21-openjdk"
+    elif [ -d "/usr/lib/jvm/java-25-openjdk" ]; then
+        export JAVA_HOME="/usr/lib/jvm/java-25-openjdk"
+    fi
+fi
+if [ -n "${JAVA_HOME:-}" ] && [ -d "${JAVA_HOME}/bin" ] && [[ ":$PATH:" != *":${JAVA_HOME}/bin:"* ]]; then
+    export PATH="${JAVA_HOME}/bin:${PATH}"
+fi
 export FSS_CORE_CLASSES="${FSS_ROOT}/fss-core/target/classes"
 export FSS_CORE_TEST_CLASSES="${FSS_ROOT}/fss-core/target/test-classes"
 export CLASSPATH="${FSS_CORE_CLASSES}:${FSS_CORE_TEST_CLASSES}:${CLASSPATH:-}"

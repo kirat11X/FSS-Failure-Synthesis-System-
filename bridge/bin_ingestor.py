@@ -32,6 +32,12 @@ FAILURE_INDICATORS: tuple[str, ...] = (
     "DISCONNECT",
     "INVALID",
     "DEGRADED",
+    "AVOID",
+    "AVOIDANCE",
+    "LEFT_FORMATION",
+    "COLLISION",
+    "BREACH",
+    "RISK",
 )
 
 
@@ -175,8 +181,8 @@ def is_critical_event(ev: dict[str, Any] | Any) -> bool:
     ]
     if isinstance(fields, dict):
         for key, value in fields.items():
-            if any(term in str(key).upper() for term in ("ERROR", "FAULT", "ALARM")):
-                if value not in (None, "", 0, "0", False):
+            if value not in (None, "", 0, "0", False):
+                if any(ind in str(key).upper() for ind in FAILURE_INDICATORS):
                     return True
             values.append(value)
     return any(

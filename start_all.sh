@@ -273,11 +273,32 @@ fi
 # ------------------------------------------------------------------------------
 echo "[5/5] Preparing FSS Query-Driven Investigation Dashboard..."
 
-if curl -sf -m 1 --noproxy "127.0.0.1,localhost" "$HEALTH_URL/_stcore/health" >/dev/null 2>&1; then
-  echo
-  ok "FSS Dashboard is already running at $URL (code reload active)"
-  command -v xdg-open >/dev/null 2>&1 && xdg-open "$URL" >/dev/null 2>&1 || true
-  exit 0
+# Terminate any existing/stale Streamlit process listening on PORT or running app.py/streamlit_app.py
+STALE_PIDS=$(pgrep -f "streamlit run (app\.py|streamlit_app\.py)" 2>/dev/null || true)
+if [ -n "$STALE_PIDS" ]; then
+  echo "  Terminating stale Streamlit process(es): $STALE_PIDS..."
+  kill -TERM $STALE_PIDS 2>/dev/null || true
+  for _ in 1 2 3; do
+    sleep 0.5
+    REMAINING=$(pgrep -f "streamlit run (app\.py|streamlit_app\.py)" 2>/dev/null || true)
+    [ -z "$REMAINING" ] && break
+  done
+  REMAINING=$(pgrep -f "streamlit run (app\.py|streamlit_app\.py)" 2>/dev/null || true)
+  if [ -n "$REMAINING" ]; then
+    kill -KILL $REMAINING 2>/dev/null || true
+  fi
+fi
+
+# Ensure port $PORT is free before binding
+if command -v fuser >/dev/null 2>&1; then
+  fuser -k "${PORT}/tcp" 2>/dev/null || true
+elif command -v lsof >/dev/null 2>&1; then
+  PORT_PID=$(lsof -ti :"$PORT" 2>/dev/null || true)
+  if [ -n "$PORT_PID" ]; then
+    kill -TERM $PORT_PID 2>/dev/null || true
+    sleep 0.5
+    kill -KILL $PORT_PID 2>/dev/null || true
+  fi
 fi
 
 echo

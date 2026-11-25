@@ -88,9 +88,9 @@ class JavaRetrievalRequest:
     max_records: int = MAX_RECORDS
 
     def __post_init__(self) -> None:
-        if self.source != "all" and (
-            type(self.source) is not int or not 0 <= self.source <= MAX_U32
-        ):
+        if (isinstance(self.source, str) and self.source.lower() == "all") or repr(self.source) == "ALL":
+            object.__setattr__(self, "source", "all")
+        elif type(self.source) is not int or not 0 <= self.source <= MAX_U32:
             raise ValueError("source must be 'all' or an unsigned 32-bit agent ID")
         for field_name in ("start_time_ns", "end_time_ns"):
             value = getattr(self, field_name)

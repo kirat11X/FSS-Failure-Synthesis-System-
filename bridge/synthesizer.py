@@ -14,6 +14,7 @@ Validates syntheses strictly against cited event IDs and evidence data gaps.
 
 from __future__ import annotations
 
+import collections
 import json
 import os
 import re
@@ -67,6 +68,14 @@ def _load_env() -> None:
         except Exception:
             pass
 
+    # Ensure localhost and 127.0.0.1 bypass any system proxy for local inference
+    for np_key in ("no_proxy", "NO_PROXY"):
+        curr = os.environ.get(np_key, "")
+        if not curr:
+            os.environ[np_key] = "127.0.0.1,localhost,::1"
+        elif "127.0.0.1" not in curr:
+            os.environ[np_key] = f"{curr},127.0.0.1,localhost,::1"
+
 
 _load_env()
 
@@ -74,7 +83,7 @@ _load_env()
 # Configuration & Backend Enforcements
 # ---------------------------------------------------------------------------
 
-DEFAULT_NUM_CTX = 1000000
+DEFAULT_NUM_CTX = 16384
 
 # Enforce num_ctx >= 16384 for Ollama
 # Spec rule: configure via OLLAMA_CONTEXT_LENGTH=16384 env, or native /api/chat options: {"num_ctx": 16384}
@@ -92,7 +101,7 @@ OLLAMA_CONTEXT_LENGTH = max(
 )
 os.environ["OLLAMA_CONTEXT_LENGTH"] = str(OLLAMA_CONTEXT_LENGTH)
 
-OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434").strip().rstrip("/")
 LLAMA_SERVER_URL = os.environ.get("LLAMA_SERVER_URL", os.environ.get("LLAMA_CPP_URL", "http://127.0.0.1:8080"))
 
 
@@ -497,13 +506,142 @@ def process_qwen3_thinking_output(raw_output: str, thinking_budget: int = DEFAUL
 # ---------------------------------------------------------------------------
 
 def estimate_tokens(text: str) -> int:
-    """Subword-calibrated token estimator for Qwen / standard BPE."""
+    """Qwen3-calibrated BPE token estimator (counts digits, subwords, underscores, and symbols)."""
     if not text:
         return 0
-    # Words + punctuation tokens heuristic
-    subword_tokens = len(re.findall(r"\w+|[^\w\s]", text))
-    char_estimate = max(1, len(text) // 4)
+    # Qwen3/Qwen2.5 BPE splits multi-digit numbers per digit and identifiers at underscores.
+    subword_tokens = len(re.findall(r"\d|[A-Za-z]{1,6}|_|[^\w\s]", text))
+    char_estimate = (len(text) + 3) // 4
     return max(subword_tokens, char_estimate)
+
+
+def _is_event_anomalous_or_active(ev: dict[str, Any]) -> bool:
+    """Detect if an event represents an active alert, anomaly, or non-default state."""
+    if ev.get("decode_status") not in (None, "SUCCESS"):
+        return True
+    fields = ev.get("fields") or {}
+    if not isinstance(fields, dict) or not fields:
+        return is_critical_event(ev)
+    if fields.get("avoidance_active") is True:
+        return True
+    heading = fields.get("heading_change_deg")
+    if heading is not None:
+        try:
+            if abs(float(heading)) > 0.01:
+                return True
+        except (ValueError, TypeError):
+            pass
+    for key, val in fields.items():
+        val_str = str(val).upper()
+        if any(
+            term in val_str
+            for term in (
+                "LOST",
+                "LEFT_FORMATION",
+                "EMERGENCY",
+                "FAIL",
+                "FAULT",
+                "ERROR",
+                "ALARM",
+                "WARN",
+                "REJOIN",
+                "DEGRADED",
+                "TIMEOUT",
+                "DISCONNECT",
+                "COLLISION",
+                "RISK",
+                "CRITICAL",
+                "INVALID",
+            )
+        ):
+            return True
+        if any(term in str(key).upper() for term in ("ERROR", "FAULT", "ALARM", "FAIL")):
+            if val not in (None, "", 0, "0", False):
+                return True
+    return False
+
+
+def _categorical_state_signature(ev: dict[str, Any]) -> tuple[Any, ...]:
+    """Build a compact state signature ignoring continuous numeric telemetry fluctuations."""
+    fields = ev.get("fields")
+    sig_parts: list[tuple[str, str]] = []
+    if isinstance(fields, dict):
+        for key in sorted(fields):
+            val = fields[key]
+            key_lower = str(key).lower()
+            is_categorical = (
+                isinstance(val, (bool, str))
+                or any(
+                    tag in key_lower
+                    for tag in ("code", "state", "status", "reason", "mode", "error", "fault", "alarm", "level", "severity")
+                )
+            )
+            if is_categorical:
+                sig_parts.append((str(key), str(val)))
+    return (ev.get("decode_status"), tuple(sig_parts))
+
+
+def _prioritize_compaction_indices(
+    all_events: list[dict[str, Any]],
+    anomalous_indices: set[int],
+    state_selected_indices: set[int],
+    max_budget_events: int,
+) -> list[int]:
+    """Select up to max_budget_events while guaranteeing per-stream onsets, categorical transitions, and endpoints."""
+    anchor_indices: set[int] = set()
+    by_stream: dict[tuple[Any, Any], list[int]] = collections.defaultdict(list)
+    for idx, ev in enumerate(all_events):
+        by_stream[(ev.get("source_id"), ev.get("event_name") or ev.get("event_type"))].append(idx)
+
+    stream_onsets: set[int] = set()
+    for idxs in by_stream.values():
+        anchor_indices.add(idxs[0])
+        anchor_indices.add(idxs[-1])
+        prev_sig = None
+        first_anom_seen = False
+        for idx in idxs:
+            sig = _categorical_state_signature(all_events[idx])
+            if prev_sig is not None and sig != prev_sig:
+                anchor_indices.add(idx)
+            prev_sig = sig
+            if not first_anom_seen and idx in anomalous_indices:
+                anchor_indices.add(idx)
+                stream_onsets.add(idx)
+                first_anom_seen = True
+
+    if len(anchor_indices) > max_budget_events:
+        # Always prioritize earliest anomaly onset and first baseline per stream, then uniform sample.
+        pinned = sorted(stream_onsets)
+        if len(pinned) >= max_budget_events:
+            step = (len(pinned) - 1) / max(1, max_budget_events - 1)
+            return sorted({pinned[round(i * step)] for i in range(max_budget_events)})
+        remaining_anchors = sorted(anchor_indices - stream_onsets)
+        rem = max_budget_events - len(pinned)
+        step = (len(remaining_anchors) - 1) / max(1, rem - 1)
+        chosen = set(pinned)
+        for i in range(min(rem, len(remaining_anchors))):
+            chosen.add(remaining_anchors[round(i * step)])
+        return sorted(chosen)
+
+    chosen = set(anchor_indices)
+    pool_anom = sorted((anomalous_indices & state_selected_indices or anomalous_indices) - chosen)
+    rem = max_budget_events - len(chosen)
+    if rem > 0 and pool_anom:
+        take = min(rem, len(pool_anom))
+        step = (len(pool_anom) - 1) / max(1, take - 1)
+        for i in range(take):
+            chosen.add(pool_anom[round(i * step)])
+
+    rem = max_budget_events - len(chosen)
+    if rem > 0:
+        pool_rest = sorted((state_selected_indices or set(range(len(all_events)))) - chosen)
+        if pool_rest:
+            take = min(rem, len(pool_rest))
+            step = (len(pool_rest) - 1) / max(1, take - 1)
+            for i in range(take):
+                chosen.add(pool_rest[round(i * step)])
+
+    return sorted(chosen)
 
 
 def preflight_budget_guard(
@@ -513,19 +651,22 @@ def preflight_budget_guard(
     effective_num_ctx: int = DEFAULT_NUM_CTX,
     enable_thinking: bool = False,
     include_event_ids: bool = True,
+    extra_overhead_tokens: int = 0,
 ) -> tuple[dict[str, Any], bool, str]:
-    """Check the complete evidence context without dropping retrieved events.
+    """Pre-flight Python token-budget guard.
 
-    Every event supplied by Java retrieval and retained in evidence must
-    remain present. If the complete prompt exceeds the budget, fail
-    explicitly instead of silently compacting the timeline.
+    Computes prompt tokens + reserved output tokens against effective num_ctx.
+    If exceeding budget, performs deterministic compaction (preserving critical events)
+    and warns before dispatch. Never silently overflows.
     """
     reserved_output = (
         RESERVED_OUTPUT_TOKENS_THINKING
         if enable_thinking
         else RESERVED_OUTPUT_TOKENS_NON_THINKING
     )
-    available_prompt_budget = max(512, effective_num_ctx - reserved_output)
+    safety_margin = 256
+    overhead = max(0, int(extra_overhead_tokens))
+    available_prompt_budget = max(512, effective_num_ctx - reserved_output - safety_margin - overhead)
 
     test_context = build_llm_context(
         evidence,
@@ -543,16 +684,155 @@ def preflight_budget_guard(
     if estimated_tokens <= available_prompt_budget:
         return evidence, False, ""
 
-    msg = (
-        f"Complete evidence context requires approximately {estimated_tokens} "
-        f"prompt tokens, exceeding the available budget of "
-        f"{available_prompt_budget} tokens (effective num_ctx={effective_num_ctx}, "
-        f"reserved output={reserved_output}). No retrieved events were removed. "
-        f"Use a larger supported context or complete-evidence chunked analysis."
-    )
+    all_events = evidence.get("events", [])
+    if not all_events:
+        msg = f"Warning: Prompt ({estimated_tokens} tokens) exceeds available budget ({available_prompt_budget} tokens)."
+        warnings.warn(msg, UserWarning, stacklevel=2)
+        return evidence, False, msg
 
-    warnings.warn(msg, UserWarning, stacklevel=2)
-    return evidence, False, msg
+    # Generic run-length state-transition & deviation-window pre-aggregation
+    by_stream: dict[tuple[Any, Any], list[tuple[int, dict[str, Any]]]] = collections.defaultdict(list)
+    anomaly_timestamps: list[int] = []
+    anomalous_indices: set[int] = set()
+
+    for idx, ev in enumerate(all_events):
+        s_id = ev.get("source_id")
+        e_type = ev.get("event_name") or ev.get("event_type")
+        by_stream[(s_id, e_type)].append((idx, ev))
+        if _is_event_anomalous_or_active(ev):
+            anomalous_indices.add(idx)
+            ts_val = ev.get("timestamp_ns")
+            if ts_val is None:
+                ts_val = ev.get("timestamp", 0)
+            anomaly_timestamps.append(int(ts_val))
+
+    t_anom_min = min(anomaly_timestamps) if anomaly_timestamps else None
+    t_anom_max = max(anomaly_timestamps) if anomaly_timestamps else None
+    t_anom_mid = ((t_anom_min + t_anom_max) // 2) if t_anom_min is not None and t_anom_max is not None else None
+
+    state_selected_indices: set[int] = set()
+    for items in by_stream.values():
+        runs: list[tuple[int, int, bool]] = []
+        run_start = 0
+        prev_fields = None
+        for i, (idx, ev) in enumerate(items):
+            fields = ev.get("fields") or {}
+            fields_tuple = (
+                tuple(sorted((k, str(v)) for k, v in fields.items()))
+                if isinstance(fields, dict) and fields
+                else ("__raw__", ev.get("event_id"))
+            )
+            if i == 0:
+                prev_fields = fields_tuple
+            elif fields_tuple != prev_fields:
+                is_anom_run = any(items[j][0] in anomalous_indices for j in range(run_start, i))
+                runs.append((run_start, i - 1, is_anom_run))
+                run_start = i
+                prev_fields = fields_tuple
+        if items:
+            is_anom_run = any(items[j][0] in anomalous_indices for j in range(run_start, len(items)))
+            runs.append((run_start, len(items) - 1, is_anom_run))
+
+        for run_idx, (r_start, r_end, _is_anom) in enumerate(runs):
+            state_selected_indices.add(items[r_start][0])
+            if run_idx == 0 or run_idx == len(runs) - 1 or not _is_anom:
+                state_selected_indices.add(items[r_end][0])
+            # For uninterrupted nominal runs spanning the anomaly window, add 1 midpoint anchor
+            if not _is_anom and t_anom_mid is not None and (r_end - r_start) >= 2:
+                ts_start = int(items[r_start][1].get("timestamp_ns") or items[r_start][1].get("timestamp", 0))
+                ts_end = int(items[r_end][1].get("timestamp_ns") or items[r_end][1].get("timestamp", 0))
+                if ts_start <= t_anom_max and ts_end >= t_anom_min:  # type: ignore[operator]
+                    best_idx = min(
+                        range(r_start + 1, r_end),
+                        key=lambda j: abs(
+                            int(items[j][1].get("timestamp_ns") or items[j][1].get("timestamp", 0))
+                            - t_anom_mid
+                        ),
+                    )
+                    state_selected_indices.add(items[best_idx][0])
+
+    # Measure exact rendered base context tokens (header + query + KB) vs total event tokens
+    base_evidence = dict(evidence)
+    base_evidence["events"] = []
+    base_context = build_llm_context(
+        base_evidence,
+        query,
+        knowledge,
+        effective_num_ctx=effective_num_ctx,
+        _skip_budget_guard=True,
+        include_event_ids=include_event_ids,
+    )
+    base_tokens = estimate_tokens(SYSTEM_PROMPT) + estimate_tokens(base_context)
+    total_event_tokens = max(1, estimated_tokens - base_tokens)
+    avg_tokens_per_event = max(45, (total_event_tokens + len(all_events) - 1) // len(all_events))
+    available_event_budget = max(300, available_prompt_budget - base_tokens)
+    max_budget_events = max(6, available_event_budget // avg_tokens_per_event)
+
+    if state_selected_indices and len(state_selected_indices) <= max_budget_events:
+        final_indices = sorted(state_selected_indices)
+    else:
+        final_indices = _prioritize_compaction_indices(
+            all_events,
+            anomalous_indices,
+            state_selected_indices,
+            max_budget_events,
+        )
+
+    compacted_events: list[dict[str, Any]] = [all_events[i] for i in final_indices]
+    compacted_evidence = dict(evidence)
+    compacted_evidence["events"] = compacted_events
+
+    def _measure(ev_list: list[dict[str, Any]]) -> int:
+        compacted_evidence["events"] = ev_list
+        ctx = build_llm_context(
+            compacted_evidence,
+            query,
+            knowledge,
+            effective_num_ctx=effective_num_ctx,
+            _skip_budget_guard=True,
+            include_event_ids=include_event_ids,
+        )
+        return estimate_tokens(SYSTEM_PROMPT) + estimate_tokens(ctx)
+
+    est_prompt_tokens2 = _measure(compacted_events)
+    critical_ids = {all_events[i].get("event_id") for i in anomalous_indices}
+
+    # First trim surplus nominal events, keeping critical anomalies intact
+    while est_prompt_tokens2 > available_prompt_budget:
+        current_nominal = [ev for ev in compacted_events if ev.get("event_id") not in critical_ids]
+        if not current_nominal:
+            break
+        to_remove_ids = {ev.get("event_id") for ev in current_nominal[1::2]} or {current_nominal[0].get("event_id")}
+        compacted_events = [ev for ev in compacted_events if ev.get("event_id") not in to_remove_ids]
+        est_prompt_tokens2 = _measure(compacted_events)
+
+    # Hard budget invariant: uniformly decimate if dense anomaly bursts still exceed budget
+    while est_prompt_tokens2 > available_prompt_budget and len(compacted_events) > 2:
+        keep_count = max(2, int(len(compacted_events) * available_prompt_budget / max(est_prompt_tokens2, 1)) - 2)
+        if keep_count >= len(compacted_events):
+            keep_count = len(compacted_events) - 1
+        step = (len(compacted_events) - 1) / max(1, keep_count - 1)
+        kept_idx = sorted({round(i * step) for i in range(keep_count)})
+        compacted_events = [compacted_events[idx] for idx in kept_idx]
+        est_prompt_tokens2 = _measure(compacted_events)
+
+    compacted_evidence["events"] = compacted_events
+    existing_gaps = list(compacted_evidence.get("data_gaps") or [])
+    guard_msg = (
+        f"Pre-flight token budget guard deterministically compacted timeline from {len(all_events)} "
+        f"to {len(compacted_evidence['events'])} events to fit effective num_ctx={effective_num_ctx} "
+        f"(reserved output: {reserved_output} tokens)."
+    )
+    existing_gaps.append({
+        "kind": "BUDGET_GUARD_COMPACTION",
+        "event_id": None,
+        "source_id": None,
+        "detail": guard_msg,
+    })
+    compacted_evidence["data_gaps"] = existing_gaps
+
+    warnings.warn(guard_msg, UserWarning, stacklevel=2)
+    return compacted_evidence, True, guard_msg
 
 # ---------------------------------------------------------------------------
 # Hybrid RAG & Prompt Context Assembly
@@ -669,6 +949,38 @@ def check_llama_server_available() -> tuple[str | None, str | None]:
         return None, str(exc)
 
 
+def _format_ollama_http_error(exc: urllib.error.HTTPError, error_body: str) -> str:
+    """Format an Ollama HTTP error, surfacing the raw JSON error message if present."""
+    raw = error_body.strip()
+    if not raw:
+        return f"HTTP {exc.code} {exc.reason}"
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict) and "error" in data:
+            err_val = data["error"]
+            if isinstance(err_val, dict) and "message" in err_val:
+                return f"HTTP {exc.code} {exc.reason}: {err_val['message']}"
+            if isinstance(err_val, str):
+                try:
+                    nested = json.loads(err_val)
+                    if isinstance(nested, dict) and "error" in nested and "message" in nested["error"]:
+                        return f"HTTP {exc.code} {exc.reason}: {nested['error']['message']}"
+                except Exception:
+                    pass
+                return f"HTTP {exc.code} {exc.reason}: {err_val}"
+    except Exception:
+        pass
+    return f"HTTP {exc.code} {exc.reason}: {raw}"
+
+
+def _bucket_context_size(min_tokens: int, min_bucket: int = 2048) -> int:
+    """Round up min_tokens to a bucket: 2048, 4096, 8192, 12288, 16384, 24576, 32768."""
+    for bucket in (2048, 4096, 8192, 12288, 16384, 24576, 32768):
+        if bucket >= min_bucket and bucket >= min_tokens:
+            return bucket
+    return max(min_tokens, 32768)
+
+
 def query_ollama(
     model: str,
     system_prompt: str,
@@ -679,9 +991,17 @@ def query_ollama(
     json_schema: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Execute inference via Ollama native /api/chat with strict num_ctx enforcement."""
+    model = model.strip()
     sampling_opts = get_qwen3_sampling_params(enable_thinking=enable_thinking, thinking_budget=thinking_budget)
 
-    effective_ctx = max(num_ctx, OLLAMA_CONTEXT_LENGTH)
+    prompt_tokens = estimate_tokens(system_prompt) + estimate_tokens(user_prompt)
+    response_headroom = (
+        RESERVED_OUTPUT_TOKENS_THINKING if enable_thinking else RESERVED_OUTPUT_TOKENS_NON_THINKING
+    )
+    needed_ctx = prompt_tokens + response_headroom + 512
+    dynamic_bucket = _bucket_context_size(needed_ctx, min_bucket=4096)
+    effective_ctx = max(num_ctx, dynamic_bucket)
+
     base_body: dict[str, Any] = {
         "model": model,
         "stream": False,
@@ -697,7 +1017,8 @@ def query_ollama(
     cpu_fallback_timeout = _inference_timeout_seconds(
         "OLLAMA_CPU_FALLBACK_TIMEOUT"
     )
-    cpu_fallback_ctx = int(os.environ.get("OLLAMA_CPU_FALLBACK_CONTEXT", "2048"))
+    base_cpu_ctx = int(os.environ.get("OLLAMA_CPU_FALLBACK_CONTEXT", "2048"))
+    cpu_fallback_ctx = max(base_cpu_ctx, _bucket_context_size(needed_ctx, min_bucket=base_cpu_ctx))
     attempts = [
         {
             "num_ctx": effective_ctx,
@@ -743,23 +1064,6 @@ def query_ollama(
                     content, thinking_budget=thinking_budget
                 )
                 return parsed
-        except (TimeoutError, urllib.error.URLError) as exc:
-            if isinstance(exc, urllib.error.URLError) and getattr(exc, "reason", None):
-                reason = str(exc.reason)
-            else:
-                reason = str(exc)
-            first_http_error = None
-            if attempt_index == len(attempts) - 1:
-                timeout_label = (
-                    "no Python timeout"
-                    if attempt_timeout is None
-                    else f"{attempt_timeout:g}s"
-                )
-                raise TimeoutError(
-                    f"Ollama exceeded {timeout_label} "
-                    f"(GPU and CPU attempts): {reason}"
-                ) from exc
-            continue
         except urllib.error.HTTPError as exc:
             try:
                 error_body = exc.read().decode("utf-8", errors="replace")
@@ -774,14 +1078,42 @@ def query_ollama(
                     "kv cache",
                     "cuda malloc",
                     "unable to allocate",
+                    "insufficient memory",
                 )
             )
-            first_http_error = exc
+            err_msg = _format_ollama_http_error(exc, error_body)
+            first_http_error = RuntimeError(f"Ollama {err_msg}")
             if attempt_index == len(attempts) - 1 or not memory_error:
-                raise
+                raise RuntimeError(f"Ollama {err_msg}") from exc
+            continue
+        except (TimeoutError, urllib.error.URLError) as exc:
+            if isinstance(exc, urllib.error.URLError) and getattr(exc, "reason", None):
+                reason = str(exc.reason)
+            else:
+                reason = str(exc)
+            first_http_error = None
+            if attempt_index == len(attempts) - 1:
+                is_timeout = (
+                    isinstance(exc, TimeoutError)
+                    or isinstance(getattr(exc, "reason", None), TimeoutError)
+                    or "timed out" in reason.lower()
+                )
+                if is_timeout:
+                    timeout_label = (
+                        "no Python timeout"
+                        if attempt_timeout is None
+                        else f"{attempt_timeout:g}s"
+                    )
+                    raise TimeoutError(
+                        f"Ollama timed out after {timeout_label} (GPU and CPU attempts): {reason}"
+                    ) from exc
+                raise ConnectionError(
+                    f"Ollama connection error (GPU and CPU attempts): {reason}"
+                ) from exc
             continue
 
     if first_http_error is not None:
+        raise first_http_error
         raise first_http_error
     raise RuntimeError("Ollama returned no inference result")
 

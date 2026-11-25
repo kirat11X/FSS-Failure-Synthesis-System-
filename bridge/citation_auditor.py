@@ -340,22 +340,46 @@ class CitationAuditor:
                 ev_src = ev["source_id"]
                 ev_name = ev.get("event_name") or ""
 
-                source_matches = re.findall(
-                    r"(?:source|node|device|entity|agent|host|service|component|unit|process)\s*#?\s*([0-9]{1,10})",
+                _noun = r"(?:sources?|nodes?|devices?|entities|entity|agents?|hosts?|services?|components?|units?|processes?|process)"
+                _entity_pat = (
+                    rf"(?P<neg>except\s+)?{_noun}(?:\s+(?:such\s+as|like|including))?\s*\(?\s*#?D?[0-9]{{1,10}}"
+                    rf"(?:\s*(?:[-–—]|,|and|or|/|&)\s*(?:{_noun})?\s*#?D?[0-9]{{1,10}})*\s*\)?"
+                )
+                named_sources: list[int] = []
+                excluded_sources: set[int] = set()
+                for span_match in re.finditer(_entity_pat, sent, re.IGNORECASE):
+                    span = span_match.group(0)
+                    target_bucket = excluded_sources if span_match.group("neg") else named_sources
+                    for r_lo, r_hi in re.findall(r"([0-9]{1,6})\s*[-–—]\s*([0-9]{1,6})", span):
+                        lo_i, hi_i = int(r_lo), int(r_hi)
+                        if 0 < hi_i - lo_i <= 64:
+                            target_bucket.extend(range(lo_i, hi_i + 1)) if target_bucket is named_sources else target_bucket.update(range(lo_i, hi_i + 1))
+                    nums = [int(num) for num in re.findall(r"[0-9]{1,10}", span)]
+                    if target_bucket is named_sources:
+                        named_sources.extend(nums)
+                    else:
+                        excluded_sources.update(nums)
+                # Handle "... services except 101, 102, and 103" exclusion lists cleanly.
+                for exc_match in re.finditer(
+                    rf"\bexcept\s+(?:{_noun}\s*)?\(?\s*#?D?[0-9]{{1,10}}(?:\s*(?:[-–—]|,|and|or|/|&)\s*#?D?[0-9]{{1,10}})*\s*\)?",
                     sent,
                     re.IGNORECASE,
-                )
-                named_sources = [int(source) for source in source_matches]
+                ):
+                    excluded_sources.update(int(n) for n in re.findall(r"[0-9]{1,10}", exc_match.group(0)))
 
-                if named_sources and ev_src not in named_sources:
-                    # (Deceptive Grounding)
+                has_mismatch = (
+                    (named_sources and ev_src not in named_sources)
+                    or (ev_src in excluded_sources)
+                )
+                if has_mismatch:
+                    claimed_label = named_sources[0] if named_sources else sorted(excluded_sources)[0]
                     mismatch = {
                         "citation": cid,
-                        "claimed_entity": named_sources[0],
+                        "claimed_entity": claimed_label,
                         "actual_entity": ev_src,
                         "event_type": ev_name,
                         "claim_sentence": sent,
-                        "reason": f"Valid telemetry from source {ev_src} was attributed to source {named_sources[0]}.",
+                        "reason": f"Valid telemetry from source {ev_src} was attributed to source {claimed_label}.",
                     }
                     entity_mismatches.append(mismatch)
                     tier1_passed = False
@@ -596,9 +620,22 @@ class CitationAuditor:
         )
 
     def _split_into_sentences(self, text: str) -> list[str]:
-        """Split text into sentences while respecting bracketed citations."""
-        raw_sents = re.split(r"(?<=[.!?])\s+", text)
-        return [s.strip() for s in raw_sents if s.strip()]
+        """Split text into sentences while respecting bracketed citations and paragraph breaks."""
+        sentences: list[str] = []
+        for para in re.split(r"\n+", text):
+            para_s = para.strip()
+            if not para_s:
+                continue
+            marked = re.sub(
+                r"([.!?](?:\s*\[[A-Za-z0-9_\-./#: ]+\])*)\s+",
+                lambda m: f"{m.group(1)}\x00",
+                para_s,
+            )
+            for chunk in marked.split("\x00"):
+                chunk_s = chunk.strip()
+                if chunk_s:
+                    sentences.append(chunk_s)
+        return sentences
 
     def _extract_atomic_claims(self, text: str, valid_citations: list[str]) -> list[dict[str, Any]]:
         """Decompose synthesis findings into atomic claims while preserving sentence context."""

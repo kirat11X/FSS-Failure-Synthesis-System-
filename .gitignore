@@ -31,8 +31,11 @@ fss-core/lib/
 *.lock
 !test_data_and_manuals/**/*.dat
 fss-core/test-data/
+fss-core/envelope.cfg
 test_data/uploads/
 test_data/real_world/
+test_data/test-data/
+test_data/test-data
 
 # Downloaded research PDFs (keep research_papers/README.md only)
 research_papers/*/

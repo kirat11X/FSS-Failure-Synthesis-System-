@@ -4,5 +4,10 @@
 # Options are passed through; see CrashHarness.java (e.g. --tests a --dir /path --kill-chains 40).
 set -euo pipefail
 cd "$(dirname "$0")"
+
+if [ -f "../fss_env.sh" ]; then
+  # shellcheck source=/dev/null
+  source "../fss_env.sh"
+fi
 mvn -q -B -DskipTests test-compile
 exec java -cp target/classes:target/test-classes fss.core.crash.CrashHarness "$@"

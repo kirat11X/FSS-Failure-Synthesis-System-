@@ -7,7 +7,17 @@ public record RetrievalRequest(
         long agentId,
         long startTime,
         long endTime,
-        Long eventType) {
+        Long eventType,
+        int maxRecords) {
+
+    public RetrievalRequest(
+            boolean allSources,
+            long agentId,
+            long startTime,
+            long endTime,
+            Long eventType) {
+        this(allSources, agentId, startTime, endTime, eventType, 5000);
+    }
 
     public static RetrievalRequest fromJson(JsonNode json) {
         if (json == null || !json.isObject()) {
@@ -18,6 +28,7 @@ public record RetrievalRequest(
         JsonNode start = json.get("start_time");
         JsonNode end = json.get("end_time");
         JsonNode event = json.get("event_type");
+        JsonNode maxRec = json.get("max_records");
 
         if (source == null || start == null || end == null) {
             throw new IllegalArgumentException("Missing required request fields");
@@ -37,7 +48,7 @@ public record RetrievalRequest(
         boolean allSources;
         long agentId = 0;
 
-        if (source.isTextual() && source.asText().equals("all")) {
+        if (source.isTextual() && source.asText().equalsIgnoreCase("all")) {
             allSources = true;
         } else if (source.isIntegralNumber()) {
             allSources = false;
@@ -62,7 +73,14 @@ public record RetrievalRequest(
                 ? null
                 : event.longValue();
 
+        int maxRecords = (maxRec != null && maxRec.isIntegralNumber())
+                ? maxRec.intValue()
+                : 5000;
+        if (maxRecords <= 0) {
+            maxRecords = 5000;
+        }
+
         return new RetrievalRequest(
-                allSources, agentId, startTime, endTime, eventType);
+                allSources, agentId, startTime, endTime, eventType, maxRecords);
     }
 }

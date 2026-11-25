@@ -14,6 +14,7 @@ Engineered against:
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import shutil
@@ -484,27 +485,24 @@ def resolve_and_convert_fixtures(
         fp = Path(p)
         resolved_fp = fp if fp.is_absolute() else (root / fp).resolve()
         if resolved_fp.exists():
-            try:
-                with open(resolved_fp, "rb") as tf:
-                    head2 = tf.read(2)
-                if len(head2) == 2 and head2[0] == 0xA3 and head2[1] == 0x95:
-                    out_fss = resolved_fp.with_suffix(".fss.bin")
-                    if out_fss.exists() and out_fss.stat().st_size > 0:
-                        resolved.append(str(out_fss))
-                        continue
-                    cache_mgr = BinCacheManager(root / "test_data" / "uploads")
-                    cached_fss, _ = cache_mgr.get_or_ingest(resolved_fp, filename=resolved_fp.name)
-                    resolved.append(str(cached_fss))
-                    continue
-                if for_storage_ipc and len(head2) == 2 and head2[0] == 0x53 and head2[1] == 0x46:
-                    conv_dir = Path("/tmp/fss_converted")
-                    conv_dir.mkdir(parents=True, exist_ok=True)
-                    out_fss = conv_dir / f"{resolved_fp.stem}.fss.bin"
-                    convert_contract_v0_to_fss_bin(resolved_fp, out_fss)
-                    resolved.append(str(out_fss))
-                    continue
-            except Exception:
-                pass
+            with open(resolved_fp, "rb") as tf:
+                head2 = tf.read(2)
+            conv_target = resolved_fp
+            if len(head2) == 2 and head2[0] == 0xA3 and head2[1] == 0x95:
+                cache_mgr = BinCacheManager(root / "test_data" / "uploads")
+                conv_target, _ = cache_mgr.get_or_ingest(resolved_fp, filename=resolved_fp.name)
+                with open(conv_target, "rb") as tf2:
+                    head2 = tf2.read(2)
+            if for_storage_ipc and len(head2) == 2 and head2[0] == 0x5A and head2[1] == 0xF5:
+                conv_dir = Path(tempfile.gettempdir()) / "fss_converted"
+                conv_dir.mkdir(parents=True, exist_ok=True)
+                digest = hashlib.sha256(str(conv_target).encode("utf-8")).hexdigest()[:12]
+                out_fss = conv_dir / f"{conv_target.stem}_{digest}.be.bin"
+                convert_contract_v0_to_fss_bin(conv_target, out_fss)
+                resolved.append(str(out_fss))
+                continue
+            resolved.append(str(conv_target))
+            continue
         resolved.append(str(resolved_fp))
     return resolved
 
@@ -579,14 +577,20 @@ class JavaRetriever:
             bridge_classes = root / "bridge" / "classes"
             lib_dir = root / "fss-core" / "lib"
             jars = [str(p) for p in sorted(lib_dir.glob("*.jar"))] if lib_dir.exists() else []
-            self.classpath = ":".join([str(core_classes), str(bridge_classes)] + jars)
+            classpath_file = root / "fss-core" / "target" / "dependency-classpath.txt"
+            dep_jars = []
+            if classpath_file.is_file():
+                dep_text = classpath_file.read_text(encoding="utf-8").strip()
+                if dep_text:
+                    dep_jars = [e for e in dep_text.split(os.pathsep) if e]
+            self.classpath = os.pathsep.join([str(core_classes), str(bridge_classes)] + jars + dep_jars)
         else:
             resolved_entries = []
-            for entry in classpath.split(":"):
+            for entry in classpath.split(os.pathsep):
                 if entry:
                     ep = Path(entry)
                     resolved_entries.append(str(ep if ep.is_absolute() else (root / ep).resolve()))
-            self.classpath = ":".join(resolved_entries)
+            self.classpath = os.pathsep.join(resolved_entries)
 
     @classmethod
     def from_fixtures(

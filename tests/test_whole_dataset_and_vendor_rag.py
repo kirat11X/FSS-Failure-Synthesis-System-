@@ -296,8 +296,9 @@ def test_streamlit_query_app_initial_render_and_three_reruns():
     assert len(at.title) > 0
     assert "Failure Synthesis System" in at.title[0].value
     assert len(at.chat_input) == 1
-    assert not at.radio
-    assert not at.selectbox
+    assert len(at.tabs) == 2
+    assert not at.tabs[0].radio
+    assert not at.tabs[0].selectbox
     for rerun_idx in range(1, 4):
         at.run()
         exceptions = [e.value for e in at.exception]

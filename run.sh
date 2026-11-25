@@ -18,9 +18,14 @@ if [ -f "fss_env.sh" ]; then
 fi
 
 # Python virtual environment activation
-if [ -d ".venv" ] && [ -f ".venv/bin/activate" ] && [ -z "${VIRTUAL_ENV:-}" ]; then
-  # shellcheck source=/dev/null
-  source .venv/bin/activate
+if [ -d ".venv" ] && [ -z "${VIRTUAL_ENV:-}" ]; then
+  if [ -f ".venv/bin/activate" ]; then
+    # shellcheck source=/dev/null
+    source .venv/bin/activate
+  elif [ -f ".venv/Scripts/activate" ]; then
+    # shellcheck source=/dev/null
+    source .venv/Scripts/activate
+  fi
 fi
 
 PORT="${PORT:-8501}"
@@ -41,12 +46,12 @@ PYTHON="${PYTHON:-$(command -v python3 || command -v python || true)}"
   || die "$("$PYTHON" -V 2>&1) is too old (need 3.11+)"
 ok "$("$PYTHON" -V 2>&1) ($PYTHON)"
 
-# Ensure Java bridge classes are compiled
-if [ ! -f "bridge/classes/bridge/JavaStoreBridge.class" ]; then
-  echo "Compiling JavaStoreBridge..."
-  bash bridge/compile.sh || die "Failed to compile Java bridge"
+# Ensure Java Storage & Retrieval IPC classes are compiled
+if [ ! -f "fss-core/target/classes/Retrieval/RetrievalMain.class" ] || [ ! -f "fss-core/target/dependency-classpath.txt" ]; then
+  echo "Compiling Java Storage & Retrieval IPC..."
+  bash bridge/compile.sh || die "Failed to compile Java classes"
 fi
-ok "Java BlockStore Bridge compiled"
+ok "Java Storage & Retrieval IPC compiled"
 
 # Check Python packages
 if ! "$PYTHON" -c 'import yaml, streamlit' 2>/dev/null; then
@@ -70,10 +75,32 @@ fi
 
 [ -n "${ANTHROPIC_API_KEY:-}" ] && ok "ANTHROPIC_API_KEY set: Claude is offered too"
 
-if curl -sf -m 2 --noproxy "127.0.0.1,localhost" "$URL/_stcore/health" >/dev/null 2>&1; then
-  echo; ok "The app is already running at $URL (it reloads code changes itself)"
-  command -v xdg-open >/dev/null && xdg-open "$URL" >/dev/null 2>&1 || true
-  exit 0
+# Terminate any existing/stale Streamlit process listening on PORT or running app.py/streamlit_app.py
+STALE_PIDS=$(pgrep -f "streamlit run (app\.py|streamlit_app\.py)" 2>/dev/null || true)
+if [ -n "$STALE_PIDS" ]; then
+  echo "  Terminating stale Streamlit process(es): $STALE_PIDS..."
+  kill -TERM $STALE_PIDS 2>/dev/null || true
+  for _ in 1 2 3; do
+    sleep 0.5
+    REMAINING=$(pgrep -f "streamlit run (app\.py|streamlit_app\.py)" 2>/dev/null || true)
+    [ -z "$REMAINING" ] && break
+  done
+  REMAINING=$(pgrep -f "streamlit run (app\.py|streamlit_app\.py)" 2>/dev/null || true)
+  if [ -n "$REMAINING" ]; then
+    kill -KILL $REMAINING 2>/dev/null || true
+  fi
+fi
+
+# Ensure port $PORT is free before binding
+if command -v fuser >/dev/null 2>&1; then
+  fuser -k "${PORT}/tcp" 2>/dev/null || true
+elif command -v lsof >/dev/null 2>&1; then
+  PORT_PID=$(lsof -ti :"$PORT" 2>/dev/null || true)
+  if [ -n "$PORT_PID" ]; then
+    kill -TERM $PORT_PID 2>/dev/null || true
+    sleep 0.5
+    kill -KILL $PORT_PID 2>/dev/null || true
+  fi
 fi
 
 echo; echo "Starting FSS Dashboard at $URL  (Ctrl+C to stop)"
